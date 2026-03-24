@@ -4,7 +4,10 @@ import { settingsDb } from '../db.mjs'
 const router = Router()
 
 router.get('/', (req, res) => {
-  res.json(settingsDb.data || {})
+  const settings = settingsDb.data || {}
+  res.json({
+    telegram: settings.telegram || {}
+  })
 })
 
 router.put('/telegram', async (req, res) => {

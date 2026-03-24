@@ -1,49 +1,60 @@
 <template>
-  <!-- Sidebar -->
-  <nav class="sidebar">
-    <div class="sidebar-brand">
-      <span class="brand-icon">☁️</span>
-      <span class="brand-text">云管理平台</span>
-    </div>
+  <router-view v-if="isPublicRoute" />
 
-    <div class="nav-section">
-      <div class="nav-label">概览</div>
-      <router-link to="/" class="nav-item">
-        <span>📊</span> 仪表板
-      </router-link>
-    </div>
+  <template v-else>
+    <nav class="sidebar">
+      <div>
+        <div class="sidebar-brand">
+          <span class="brand-icon">☁️</span>
+          <span class="brand-text">云管理平台</span>
+        </div>
 
-    <div class="nav-section">
-      <div class="nav-label">管理</div>
-      <router-link to="/accounts" class="nav-item">
-        <span>👤</span> 账户管理
-      </router-link>
-      <router-link to="/cloud" class="nav-item">
-        <span>☁️</span> 云实例
-      </router-link>
-      <router-link to="/dns" class="nav-item">
-        <span>🌐</span> DNS 管理
-      </router-link>
-    </div>
+        <div class="nav-section">
+          <div class="nav-label">概览</div>
+          <router-link to="/" class="nav-item">
+            <span>📊</span> 仪表盘
+          </router-link>
+        </div>
 
-    <div class="nav-section">
-      <div class="nav-label">系统</div>
-      <router-link to="/tasks" class="nav-item">
-        <span>⚙️</span> 任务队列
-        <span v-if="pendingCount > 0" class="nav-badge">{{ pendingCount }}</span>
-      </router-link>
-      <router-link to="/settings" class="nav-item">
-        <span>🔧</span> 系统设置
-      </router-link>
-    </div>
-  </nav>
+        <div class="nav-section">
+          <div class="nav-label">管理</div>
+          <router-link to="/accounts" class="nav-item">
+            <span>👤</span> 账户管理
+          </router-link>
+          <router-link to="/cloud" class="nav-item">
+            <span>☁️</span> 云实例
+          </router-link>
+          <router-link to="/dns" class="nav-item">
+            <span>🌐</span> DNS 管理
+          </router-link>
+        </div>
 
-  <!-- Main content -->
-  <main class="main-content">
-    <router-view />
-  </main>
+        <div class="nav-section">
+          <div class="nav-label">系统</div>
+          <router-link to="/tasks" class="nav-item">
+            <span>⚙️</span> 任务队列
+            <span v-if="pendingCount > 0" class="nav-badge">{{ pendingCount }}</span>
+          </router-link>
+          <router-link to="/settings" class="nav-item">
+            <span>🔧</span> 系统设置
+          </router-link>
+        </div>
+      </div>
 
-  <!-- Toast container -->
+      <div class="sidebar-user">
+        <div class="sidebar-user-meta">
+          <div class="sidebar-user-name">{{ authState.user?.username || 'admin' }}</div>
+          <div class="sidebar-user-hint">{{ authState.user?.mustChangePassword ? '需要修改密码' : '已登录' }}</div>
+        </div>
+        <button class="btn btn-ghost sidebar-logout" @click="handleLogout">退出登录</button>
+      </div>
+    </nav>
+
+    <main class="main-content">
+      <router-view />
+    </main>
+  </template>
+
   <div class="toast-container">
     <div v-for="t in toasts" :key="t.id" :class="['toast', `toast-${t.type}`]">
       {{ t.message }}
@@ -52,40 +63,73 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { getAuthToken } from './api/index.js'
+import { authState, initAuth, logout } from './auth.js'
 
+const route = useRoute()
+const router = useRouter()
 const pendingCount = ref(0)
 const toasts = ref([])
+const isPublicRoute = computed(() => Boolean(route.meta.public))
 let sseSource = null
 
-// SSE connection for task updates
 onMounted(() => {
-  connectSSE()
+  initAuth()
 })
 
 onUnmounted(() => {
-  if (sseSource) sseSource.close()
+  closeSSE()
+})
+
+watch(
+  () => authState.authenticated,
+  (authenticated) => {
+    if (authenticated && !isPublicRoute.value) connectSSE()
+    else closeSSE()
+  },
+  { immediate: true }
+)
+
+watch(isPublicRoute, (publicRoute) => {
+  if (publicRoute) closeSSE()
+  else if (authState.authenticated) connectSSE()
 })
 
 function connectSSE() {
-  sseSource = new EventSource('/api/tasks/stream')
+  const token = getAuthToken()
+  if (!token) return
+
+  closeSSE()
+  sseSource = new EventSource(`/api/tasks/stream?token=${encodeURIComponent(token)}`)
   sseSource.onmessage = (e) => {
     const data = JSON.parse(e.data)
     if (data.event === 'init') {
-      pendingCount.value = data.tasks.filter(t => ['pending', 'running'].includes(t.status)).length
+      pendingCount.value = data.tasks.filter((t) => ['pending', 'running'].includes(t.status)).length
     } else if (data.event === 'task:created') {
       pendingCount.value++
     } else if (data.event === 'task:updated') {
-      const t = data.task
-      if (['done', 'failed', 'cancelled'].includes(t.status)) {
+      const task = data.task
+      if (['done', 'failed', 'cancelled'].includes(task.status)) {
         pendingCount.value = Math.max(0, pendingCount.value - 1)
-        if (t.status === 'done') showToast('任务完成: ' + t.type, 'success')
-        if (t.status === 'failed') showToast('任务失败: ' + (t.error || t.type), 'error')
+        if (task.status === 'done') showToast(`任务完成: ${task.type}`, 'success')
+        if (task.status === 'failed') showToast(`任务失败: ${task.error || task.type}`, 'error')
       }
     }
   }
   sseSource.onerror = () => {
-    setTimeout(connectSSE, 5000)
+    closeSSE()
+    if (authState.authenticated && !isPublicRoute.value) {
+      setTimeout(connectSSE, 5000)
+    }
+  }
+}
+
+function closeSSE() {
+  if (sseSource) {
+    sseSource.close()
+    sseSource = null
   }
 }
 
@@ -93,11 +137,17 @@ function showToast(message, type = 'info') {
   const id = Date.now()
   toasts.value.push({ id, message, type })
   setTimeout(() => {
-    toasts.value = toasts.value.filter(t => t.id !== id)
+    toasts.value = toasts.value.filter((t) => t.id !== id)
   }, 4000)
 }
 
-// Expose for child components
+async function handleLogout() {
+  await logout()
+  pendingCount.value = 0
+  showToast('已退出登录', 'info')
+  router.replace('/login')
+}
+
 window.$toast = showToast
 </script>
 
@@ -111,6 +161,7 @@ window.$toast = showToast
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  justify-content: space-between;
   padding: 16px 12px;
   gap: 4px;
 }
@@ -184,5 +235,32 @@ window.$toast = showToast
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+.sidebar-user {
+  padding: 12px 8px 4px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sidebar-user-meta {
+  padding: 0 4px;
+}
+
+.sidebar-user-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sidebar-user-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.sidebar-logout {
+  width: 100%;
+  justify-content: center;
 }
 </style>

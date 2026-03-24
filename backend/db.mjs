@@ -36,6 +36,13 @@ await tasksDb.read()
  */
 const settingsFile = new JSONFile(join(dataDir, 'settings.json'))
 export const settingsDb = new Low(settingsFile, {
-  telegram: { botToken: '', chatId: '' }
+  telegram: { botToken: '', chatId: '' },
+  auth: {
+    username: 'admin',
+    passwordHash: '',
+    passwordSalt: '',
+    mustChangePassword: true,
+    sessions: []
+  }
 })
 await settingsDb.read()

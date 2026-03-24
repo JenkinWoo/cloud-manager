@@ -1,6 +1,6 @@
 {
   "name": "cloud-manager",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "统一管理 Oracle、AWS、DNS 与任务队列的云资源管理平台。",
   "author": "JenkinWoo",
   "license": "ISC",

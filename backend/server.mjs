@@ -5,10 +5,12 @@ import { fileURLToPath } from 'url'
 import { resumePersistedTasks } from './queue.mjs'
 
 import accountsRouter from './routes/accounts.mjs'
+import authRouter, { authRequired } from './routes/auth.mjs'
 import cloudRouter from './routes/cloud.mjs'
 import dnsRouter from './routes/dnsRoute.mjs'
 import settingsRouter from './routes/settings.mjs'
 import tasksRouter from './routes/tasks.mjs'
+import { ensureAuthConfig } from './utils/auth.mjs'
 
 import './services/telegramNotifier.mjs'
 import './workers/cloudWorker.mjs'
@@ -20,6 +22,14 @@ const PORT = process.env.PORT || 3001
 app.use(cors())
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
+
+await ensureAuthConfig()
+
+app.use('/api/auth', authRouter)
+app.use('/api', (req, res, next) => {
+  if (req.path === '/health' || req.path === '/providers') return next()
+  return authRequired(req, res, next)
+})
 
 app.use('/api/accounts', accountsRouter)
 app.use('/api/cloud/:accountId', cloudRouter)
