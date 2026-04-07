@@ -3,12 +3,12 @@
     <div class="page-header">
       <div>
         <h1>系统设置</h1>
-        <p>配置通知与账户安全信息</p>
+        <p>配置通知与账户安全信息。</p>
       </div>
     </div>
 
-    <div class="card" style="margin-bottom:16px">
-      <h3 style="font-size:15px;font-weight:600;margin-bottom:16px">Telegram 通知</h3>
+    <div class="card section-card">
+      <h3 class="section-title">Telegram 通知</h3>
       <div class="form-group">
         <label>Bot Token</label>
         <input v-model="tgForm.botToken" class="form-control" type="password" placeholder="请输入 Telegram Bot Token" />
@@ -22,54 +22,66 @@
       </button>
     </div>
 
-    <div class="card" style="margin-bottom:16px">
-      <h3 style="font-size:15px;font-weight:600;margin-bottom:16px">账户安全</h3>
+    <div class="card section-card">
+      <h3 class="section-title">账户安全</h3>
       <div class="form-group">
         <label>用户名</label>
         <input v-model.trim="accountForm.username" class="form-control" placeholder="至少 3 个字符" />
       </div>
       <div class="form-group">
         <label>新密码</label>
-        <input v-model="accountForm.newPassword" class="form-control" type="password" autocomplete="new-password"
-          placeholder="留空则不修改密码" />
+        <input
+          v-model="accountForm.newPassword"
+          class="form-control"
+          type="password"
+          autocomplete="new-password"
+          placeholder="留空则不修改密码"
+        />
       </div>
       <div class="form-group">
         <label>确认新密码</label>
-        <input v-model="accountForm.confirmPassword" class="form-control" type="password" autocomplete="new-password"
-          placeholder="再次输入新密码" />
+        <input
+          v-model="accountForm.confirmPassword"
+          class="form-control"
+          type="password"
+          autocomplete="new-password"
+          placeholder="再次输入新密码"
+        />
       </div>
       <div class="form-group">
         <label>当前密码</label>
-        <input v-model="accountForm.currentPassword" class="form-control" type="password"
-          autocomplete="current-password" placeholder="保存前请输入当前密码确认" />
+        <input
+          v-model="accountForm.currentPassword"
+          class="form-control"
+          type="password"
+          autocomplete="current-password"
+          placeholder="保存前请输入当前密码确认"
+        />
       </div>
       <button class="btn btn-primary" @click="saveAccountSecurity" :disabled="savingAccount">
         {{ savingAccount ? '保存中...' : '保存账户信息' }}
       </button>
-      <p style="margin-top:10px;font-size:12px;color:var(--text-secondary)">
+      <p class="hint-text">
         可以同时修改用户名和密码；如果本次修改了密码，保存后会自动退出并要求重新登录。
       </p>
     </div>
 
     <div class="card">
-      <h3 style="font-size:15px;font-weight:600;margin-bottom:12px">关于</h3>
-      <div style="display:flex;flex-direction:column;gap:8px;font-size:13px;color:var(--text-secondary)">
-        <div>版本: <span style="color:var(--text-primary)">1.1.0</span></div>
+      <h3 class="section-title">关于</h3>
+      <div class="about-list">
+        <div>版本: <span class="about-value">1.1.0</span></div>
         <div>
           后端:
-          <a :href="backendHealthUrl" target="_blank" rel="noreferrer" style="color:var(--accent)">
-            {{ backendBaseUrl }}
-          </a>
+          <a :href="backendHealthUrl" target="_blank" rel="noreferrer" class="about-link">{{ backendBaseUrl }}</a>
         </div>
         <div>
           GitHub:
-          <a href="https://github.com/JenkinWoo/cloud-manager" target="_blank" rel="noreferrer"
-            style="color:var(--accent)">
+          <a href="https://github.com/JenkinWoo/cloud-manager" target="_blank" rel="noreferrer" class="about-link">
             https://github.com/JenkinWoo/cloud-manager
           </a>
         </div>
         <div>技术栈: Express.js / Vue 3 / Vite / lowdb</div>
-        <div>支持的云: Oracle Cloud / AWS</div>
+        <div>支持的云: Oracle Cloud / AWS / Azure</div>
       </div>
     </div>
   </div>
@@ -99,8 +111,8 @@ onMounted(async () => {
   accountForm.value.username = authState.user?.username || ''
 
   try {
-    const res = await settingsApi.get()
-    const settings = res.data || {}
+    const response = await settingsApi.get()
+    const settings = response.data || {}
     tgForm.value.botToken = settings.telegram?.botToken || ''
     tgForm.value.chatId = settings.telegram?.chatId || ''
   } catch (_) {
@@ -112,8 +124,8 @@ async function saveTg() {
   try {
     await settingsApi.updateTelegram(tgForm.value)
     window.$toast?.('Telegram 配置已保存', 'success')
-  } catch (e) {
-    window.$toast?.(e.response?.data?.error || e.message, 'error')
+  } catch (error) {
+    window.$toast?.(error.response?.data?.error || error.message, 'error')
   } finally {
     savingTg.value = false
   }
@@ -135,13 +147,13 @@ async function saveAccountSecurity() {
 
   savingAccount.value = true
   try {
-    const res = await authApi.updateAccount({
+    const response = await authApi.updateAccount({
       newUsername: accountForm.value.username,
       newPassword: accountForm.value.newPassword,
       currentPassword: accountForm.value.currentPassword
     })
 
-    if (res.data.requiresRelogin) {
+    if (response.data.requiresRelogin) {
       await logout()
       window.$toast?.('账户信息已更新，请重新登录', 'success')
       await router.replace('/login')
@@ -150,17 +162,52 @@ async function saveAccountSecurity() {
 
     setAuthUser({
       ...authState.user,
-      ...res.data.user,
+      ...response.data.user,
       authenticated: true
     })
+
     accountForm.value.currentPassword = ''
     accountForm.value.newPassword = ''
     accountForm.value.confirmPassword = ''
     window.$toast?.('账户信息已更新', 'success')
-  } catch (e) {
-    window.$toast?.(e.response?.data?.error || e.message, 'error')
+  } catch (error) {
+    window.$toast?.(error.response?.data?.error || error.message, 'error')
   } finally {
     savingAccount.value = false
   }
 }
 </script>
+
+<style scoped>
+.section-card {
+  margin-bottom: 16px;
+}
+
+.section-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.hint-text {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.about-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.about-link {
+  color: var(--accent);
+}
+
+.about-value {
+  color: var(--text-primary);
+}
+</style>

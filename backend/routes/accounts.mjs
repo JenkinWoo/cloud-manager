@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { accountsDb, dnsAccountsDb } from '../db.mjs'
 import { listProviders } from '../providers/registry.mjs'
 import { getComputeProvider } from '../providers/registry.mjs'
+import { normalizeAzureCredentials } from '../utils/azureCredentials.mjs'
 
 const router = Router()
 
@@ -24,9 +25,11 @@ router.post('/', async (req, res) => {
     const { name, computeProvider, credentials = {}, enabled = true } = req.body
     if (!name || !computeProvider) return res.status(400).json({ error: 'name 和 computeProvider 为必填项' })
 
+    const normalizedCredentials = computeProvider === 'azure' ? normalizeAzureCredentials(credentials) : credentials
+
     const account = {
       id: uuidv4(),
-      name, computeProvider, credentials, enabled,
+      name, computeProvider, credentials: normalizedCredentials, enabled,
       createdAt: new Date().toISOString()
     }
     accountsDb.data.accounts.push(account)
@@ -42,7 +45,11 @@ router.put('/:id', async (req, res) => {
   try {
     const account = accountsDb.data.accounts.find(a => a.id === req.params.id)
     if (!account) return res.status(404).json({ error: '账户不存在' })
-    Object.assign(account, req.body, { id: account.id, createdAt: account.createdAt })
+    const nextPayload = { ...req.body }
+    if ((nextPayload.computeProvider || account.computeProvider) === 'azure') {
+      nextPayload.credentials = normalizeAzureCredentials(nextPayload.credentials || account.credentials || {})
+    }
+    Object.assign(account, nextPayload, { id: account.id, createdAt: account.createdAt })
     await accountsDb.write()
     res.json(account)
   } catch (err) {

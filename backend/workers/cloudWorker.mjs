@@ -44,7 +44,12 @@ async function handleCreateInstance(task, account) {
       const msg = err.message || ''
 
       // Out of capacity - retry
-      if (msg.includes('Out of host capacity') || msg.includes('InsufficientInstanceCapacity')) {
+      if (
+        msg.includes('Out of host capacity') ||
+        msg.includes('InsufficientInstanceCapacity') ||
+        msg.includes('AllocationFailed') ||
+        msg.includes('OverconstrainedAllocationRequest')
+      ) {
         await updateTask(task.id, { statusMessage: `资源不足，${delay}s 后重试 (第 ${_index} 次)` })
         setTimeout(attempt, delay * 1000)
         return
@@ -58,7 +63,13 @@ async function handleCreateInstance(task, account) {
       }
 
       // Quota exceeded - fatal
-      if (msg.includes('limit') || msg.includes('LimitExceeded') || msg.includes('quota')) {
+      if (
+        msg.includes('limit') ||
+        msg.includes('LimitExceeded') ||
+        msg.includes('quota') ||
+        msg.includes('QuotaExceeded') ||
+        msg.includes('OperationNotAllowed')
+      ) {
         await updateTask(task.id, { status: 'failed', error: `配额超限：${msg}` })
         return
       }

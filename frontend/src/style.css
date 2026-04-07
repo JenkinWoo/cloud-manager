@@ -232,6 +232,11 @@ body {
   color: var(--orange);
 }
 
+.badge-azure {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
 /* Forms */
 .form-group {
   display: flex;

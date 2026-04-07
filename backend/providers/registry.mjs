@@ -9,6 +9,7 @@
 
 import OracleProvider from './compute/OracleProvider.mjs'
 import AwsProvider from './compute/AwsProvider.mjs'
+import AzureProvider from './compute/AzureProvider.mjs'
 
 import CloudflareProvider from './dns/CloudflareProvider.mjs'
 import AliyunProvider from './dns/AliyunProvider.mjs'
@@ -20,8 +21,8 @@ import AliyunProvider from './dns/AliyunProvider.mjs'
 const computeProviders = {
   oracle: OracleProvider,
   aws:    AwsProvider,
+  azure:  AzureProvider,
   // gcp:   GcpProvider,
-  // azure: AzureProvider,
 }
 
 const dnsProviders = {

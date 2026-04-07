@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h1>仪表盘</h1>
-        <p>查看账户概览与当前任务状态</p>
+        <p>查看账户概览与当前任务状态。</p>
       </div>
       <button class="btn btn-ghost" @click="loadAll" :disabled="loading">
         <span :class="loading ? 'spinner' : ''">{{ loading ? '' : '刷新' }}</span>
@@ -12,32 +12,37 @@
 
     <div class="stats-grid">
       <div class="card stat-card">
-        <div class="stat-icon">👤</div>
+        <div class="stat-icon">AC</div>
         <div class="stat-value">{{ accounts.length }}</div>
         <div class="stat-label">总账户数</div>
       </div>
       <div class="card stat-card">
-        <div class="stat-icon">🟥</div>
+        <div class="stat-icon">OCI</div>
         <div class="stat-value">{{ oracleAccounts.length }}</div>
         <div class="stat-label">Oracle 账户</div>
       </div>
       <div class="card stat-card">
-        <div class="stat-icon">🟨</div>
+        <div class="stat-icon">AWS</div>
         <div class="stat-value">{{ awsAccounts.length }}</div>
         <div class="stat-label">AWS 账户</div>
       </div>
       <div class="card stat-card">
-        <div class="stat-icon">🌐</div>
+        <div class="stat-icon">AZ</div>
+        <div class="stat-value">{{ azureAccounts.length }}</div>
+        <div class="stat-label">Azure 账户</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-icon">DNS</div>
         <div class="stat-value">{{ dnsAccounts.length }}</div>
         <div class="stat-label">DNS 账户</div>
       </div>
       <div class="card stat-card">
-        <div class="stat-icon" style="color:var(--yellow)">⏳</div>
+        <div class="stat-icon" style="color:var(--yellow)">RUN</div>
         <div class="stat-value" style="color:var(--yellow)">{{ pendingTasks }}</div>
-        <div class="stat-label">进行中任务</div>
+        <div class="stat-label">运行中任务</div>
       </div>
       <div class="card stat-card">
-        <div class="stat-icon" style="color:var(--text-secondary)">✅</div>
+        <div class="stat-icon" style="color:var(--text-secondary)">ON</div>
         <div class="stat-value" style="color:var(--text-secondary)">{{ enabledAccounts.length }}</div>
         <div class="stat-label">启用中的计算账户</div>
       </div>
@@ -82,7 +87,7 @@
             </span>
           </div>
           <div class="overview-extra">
-            <span>主域名: {{ account.credentials?.domainName || '-' }}</span>
+            <span>根域名 {{ account.credentials?.domainName || '-' }}</span>
             <span>创建于 {{ formatDate(account.createdAt) }}</span>
           </div>
         </div>
@@ -108,6 +113,7 @@ const loading = ref(false)
 
 const oracleAccounts = computed(() => accounts.value.filter((item) => item.computeProvider === 'oracle'))
 const awsAccounts = computed(() => accounts.value.filter((item) => item.computeProvider === 'aws'))
+const azureAccounts = computed(() => accounts.value.filter((item) => item.computeProvider === 'azure'))
 const enabledAccounts = computed(() => accounts.value.filter((item) => item.enabled !== false))
 
 onMounted(loadAll)
@@ -124,8 +130,8 @@ async function loadAll() {
     accounts.value = accountRes.data || []
     dnsAccounts.value = dnsRes.data || []
     pendingTasks.value = taskRes.data.length
-  } catch (e) {
-    window.$toast?.(`加载失败: ${e.message}`, 'error')
+  } catch (error) {
+    window.$toast?.(`加载失败: ${error.message}`, 'error')
   } finally {
     loading.value = false
   }
@@ -134,6 +140,7 @@ async function loadAll() {
 function providerLabel(provider) {
   if (provider === 'oracle') return 'Oracle'
   if (provider === 'aws') return 'AWS'
+  if (provider === 'azure') return 'Azure'
   return provider || '-'
 }
 

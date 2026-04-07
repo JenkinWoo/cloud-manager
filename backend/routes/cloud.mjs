@@ -15,6 +15,18 @@ function requireAccount(id) {
   return account
 }
 
+function resolveAzureSubscriptionId(req) {
+  return req.body?.subscriptionId || req.query?.subscriptionId || ''
+}
+
+function getScopedProvider(account, req) {
+  const provider = getComputeProvider(account)
+  if (account.computeProvider === 'azure' && typeof provider.useSubscription === 'function') {
+    provider.useSubscription(resolveAzureSubscriptionId(req))
+  }
+  return provider
+}
+
 function withTimeout(promise, ms, message) {
   let timer = null
 
@@ -31,7 +43,7 @@ function withTimeout(promise, ms, message) {
 router.get('/instances', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
     const result = await withTimeout(
       provider.listInstances(),
       READ_TIMEOUT_MS,
@@ -46,7 +58,7 @@ router.get('/instances', async (req, res) => {
 router.get('/instances/:instanceId', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
     const result = await withTimeout(
       provider.getInstance(req.params.instanceId),
       READ_TIMEOUT_MS,
@@ -58,11 +70,56 @@ router.get('/instances/:instanceId', async (req, res) => {
   }
 })
 
-router.get('/capabilities', (req, res) => {
+router.get('/capabilities', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
     res.json({ provider: account.computeProvider, capabilities: provider.constructor.capabilities || [] })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/azure/subscriptions', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    if (account.computeProvider !== 'azure') {
+      return res.status(400).json({ error: '当前账户不是 Azure 账户' })
+    }
+
+    const provider = getComputeProvider(account)
+    res.json(await provider.listEligibleSubscriptions())
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/azure/locations', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    if (account.computeProvider !== 'azure') {
+      return res.status(400).json({ error: '当前账户不是 Azure 账户' })
+    }
+
+    const provider = getComputeProvider(account)
+    res.json(await provider.listLocations(req.query.subscriptionId))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/azure/vm-sizes', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    if (account.computeProvider !== 'azure') {
+      return res.status(400).json({ error: '当前账户不是 Azure 账户' })
+    }
+    if (!req.query.location) {
+      return res.status(400).json({ error: 'location 为必填项' })
+    }
+
+    const provider = getComputeProvider(account)
+    res.json(await provider.listVmSizes(req.query.location, req.query.subscriptionId))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -75,6 +132,9 @@ router.post('/instances', async (req, res) => {
 
     if (account.computeProvider === 'oracle') {
       validateOracleInstancePassword(params.rootPassword)
+    }
+    if (account.computeProvider === 'azure' && !params.adminPassword) {
+      throw new Error('Azure 实例创建需要 adminPassword')
     }
 
     const task = await createTask('cloud:createInstance', account.id, {
@@ -92,7 +152,7 @@ router.post('/instances', async (req, res) => {
 router.post('/instances/:instanceId/action', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
     const { action = 'START' } = req.body
     res.json({ success: true, ...(await provider.instanceAction(req.params.instanceId, action)) })
   } catch (err) {
@@ -103,7 +163,7 @@ router.post('/instances/:instanceId/action', async (req, res) => {
 router.delete('/instances/:instanceId', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
     res.json({ success: true, ...(await provider.deleteInstance(req.params.instanceId)) })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -113,7 +173,7 @@ router.delete('/instances/:instanceId', async (req, res) => {
 router.post('/instances/:instanceId/switch-ip', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
     const providerCapabilities = provider.constructor.capabilities || []
 
     if (!providerCapabilities.includes('switch_ip') && !providerCapabilities.includes('elastic_ip')) {
@@ -140,7 +200,7 @@ router.post('/instances/:instanceId/switch-ip', async (req, res) => {
 router.post('/instances/:instanceId/add-ipv6', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
 
     if (!(provider.constructor.capabilities || []).includes('ipv6')) {
       return res.status(400).json({ error: `${account.computeProvider} 不支持 IPv6` })
@@ -155,7 +215,7 @@ router.post('/instances/:instanceId/add-ipv6', async (req, res) => {
 router.get('/elastic-ips', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
 
     if (typeof provider.listElasticIps !== 'function') {
       return res.status(400).json({ error: '当前云账户不支持弹性 IP 查询' })
@@ -175,7 +235,7 @@ router.get('/elastic-ips', async (req, res) => {
 router.post('/elastic-ips/release-unused', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
 
     if (typeof provider.releaseUnusedElasticIps !== 'function') {
       return res.status(400).json({ error: '当前云账户不支持释放空闲弹性 IP' })
@@ -191,7 +251,7 @@ router.post('/elastic-ips/release-unused', async (req, res) => {
 router.put('/instances/:instanceId/shape', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
 
     if (!(provider.constructor.capabilities || []).includes('modify_config')) {
       return res.status(400).json({ error: `${account.computeProvider} 不支持修改配置` })
@@ -206,7 +266,7 @@ router.put('/instances/:instanceId/shape', async (req, res) => {
 router.post('/instances/:instanceId/firewall/allow-all', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
     res.json({ success: true, ...(await provider.allowAllInboundTraffic(req.params.instanceId)) })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -216,7 +276,7 @@ router.post('/instances/:instanceId/firewall/allow-all', async (req, res) => {
 router.get('/volumes', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
 
     if (!(provider.constructor.capabilities || []).includes('list_boot_volumes')) {
       return res.status(400).json({ error: `${account.computeProvider} 不支持管理引导卷` })
@@ -236,7 +296,7 @@ router.get('/volumes', async (req, res) => {
 router.delete('/volumes/:volumeId', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
     res.json({ success: true, ...(await provider.deleteBootVolume(req.params.volumeId)) })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -246,7 +306,7 @@ router.delete('/volumes/:volumeId', async (req, res) => {
 router.post('/network/setup', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const provider = getComputeProvider(account)
+    const provider = getScopedProvider(account, req)
 
     if (typeof provider.createNetwork !== 'function') {
       return res.status(400).json({ error: `${account.computeProvider} 不支持自动创建网络` })

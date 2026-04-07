@@ -69,13 +69,14 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { tasksApi, accountsApi } from '../api/index.js'
+import { tasksApi, accountsApi, getAuthToken } from '../api/index.js'
 
 const tasks = ref([])
 const accounts = ref([])
 const filterStatus = ref('')
 const connected = ref(false)
 let sseSource = null
+let reconnectTimer = null
 
 const filteredTasks = computed(() => {
   if (!filterStatus.value) return tasks.value
@@ -88,10 +89,19 @@ onMounted(async () => {
   connectSSE()
 })
 
-onUnmounted(() => { if (sseSource) sseSource.close() })
+onUnmounted(() => {
+  closeSSE()
+})
 
 function connectSSE() {
-  sseSource = new EventSource('/api/tasks/stream')
+  const token = getAuthToken()
+  if (!token) {
+    connected.value = false
+    return
+  }
+
+  closeSSE()
+  sseSource = new EventSource(`/api/tasks/stream?token=${encodeURIComponent(token)}`)
   sseSource.onopen = () => { connected.value = true }
   sseSource.onmessage = (e) => {
     const data = JSON.parse(e.data)
@@ -106,8 +116,20 @@ function connectSSE() {
     }
   }
   sseSource.onerror = () => {
-    connected.value = false
-    setTimeout(connectSSE, 5000)
+    closeSSE()
+    reconnectTimer = setTimeout(connectSSE, 5000)
+  }
+}
+
+function closeSSE() {
+  connected.value = false
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  if (sseSource) {
+    sseSource.close()
+    sseSource = null
   }
 }
 

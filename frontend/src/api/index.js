@@ -49,25 +49,29 @@ export const accountsApi = {
 }
 
 export const cloudApi = {
-  listInstances: (accountId) => api.get(`/cloud/${accountId}/instances`),
-  getInstance: (accountId, instanceId) => api.get(`/cloud/${accountId}/instances/${instanceId}`),
+  listInstances: (accountId, params = {}) => api.get(`/cloud/${accountId}/instances`, { params }),
+  getInstance: (accountId, instanceId, params = {}) => api.get(`/cloud/${accountId}/instances/${instanceId}`, { params }),
   createInstance: (accountId, data) => api.post(`/cloud/${accountId}/instances`, data),
-  instanceAction: (accountId, instanceId, action) =>
-    api.post(`/cloud/${accountId}/instances/${instanceId}/action`, { action }),
-  deleteInstance: (accountId, instanceId) => api.delete(`/cloud/${accountId}/instances/${instanceId}`),
+  instanceAction: (accountId, instanceId, action, data = {}) =>
+    api.post(`/cloud/${accountId}/instances/${instanceId}/action`, { action, ...data }),
+  deleteInstance: (accountId, instanceId, params = {}) =>
+    api.delete(`/cloud/${accountId}/instances/${instanceId}`, { params }),
   switchIp: (accountId, instanceId, data) =>
     api.post(`/cloud/${accountId}/instances/${instanceId}/switch-ip`, data),
-  addIpv6: (accountId, instanceId) => api.post(`/cloud/${accountId}/instances/${instanceId}/add-ipv6`),
-  listElasticIps: (accountId) => api.get(`/cloud/${accountId}/elastic-ips`),
-  releaseUnused: (accountId) => api.post(`/cloud/${accountId}/elastic-ips/release-unused`),
-  capabilities: (accountId) => api.get(`/cloud/${accountId}/capabilities`),
+  addIpv6: (accountId, instanceId, data = {}) => api.post(`/cloud/${accountId}/instances/${instanceId}/add-ipv6`, data),
+  listElasticIps: (accountId, params = {}) => api.get(`/cloud/${accountId}/elastic-ips`, { params }),
+  releaseUnused: (accountId, data = {}) => api.post(`/cloud/${accountId}/elastic-ips/release-unused`, data),
+  capabilities: (accountId, params = {}) => api.get(`/cloud/${accountId}/capabilities`, { params }),
   modifyShape: (accountId, instanceId, data) =>
     api.put(`/cloud/${accountId}/instances/${instanceId}/shape`, data),
-  allowAllFirewall: (accountId, instanceId) =>
-    api.post(`/cloud/${accountId}/instances/${instanceId}/firewall/allow-all`),
-  listVolumes: (accountId) => api.get(`/cloud/${accountId}/volumes`),
-  deleteVolume: (accountId, volumeId) => api.delete(`/cloud/${accountId}/volumes/${volumeId}`),
-  setupNetwork: (accountId) => api.post(`/cloud/${accountId}/network/setup`)
+  allowAllFirewall: (accountId, instanceId, data = {}) =>
+    api.post(`/cloud/${accountId}/instances/${instanceId}/firewall/allow-all`, data),
+  listVolumes: (accountId, params = {}) => api.get(`/cloud/${accountId}/volumes`, { params }),
+  deleteVolume: (accountId, volumeId, params = {}) => api.delete(`/cloud/${accountId}/volumes/${volumeId}`, { params }),
+  setupNetwork: (accountId, data = {}) => api.post(`/cloud/${accountId}/network/setup`, data),
+  listAzureSubscriptions: (accountId) => api.get(`/cloud/${accountId}/azure/subscriptions`),
+  listAzureLocations: (accountId, params = {}) => api.get(`/cloud/${accountId}/azure/locations`, { params }),
+  listAzureVmSizes: (accountId, params = {}) => api.get(`/cloud/${accountId}/azure/vm-sizes`, { params })
 }
 
 export const dnsApi = {
