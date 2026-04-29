@@ -8,9 +8,11 @@ import accountsRouter from './routes/accounts.mjs'
 import authRouter, { authRequired } from './routes/auth.mjs'
 import cloudRouter from './routes/cloud.mjs'
 import dnsRouter from './routes/dnsRoute.mjs'
+import logsRouter from './routes/logs.mjs'
 import settingsRouter from './routes/settings.mjs'
 import tasksRouter from './routes/tasks.mjs'
 import { ensureAuthConfig } from './utils/auth.mjs'
+import { cleanupExpiredOperationLogs, operationLogMiddleware } from './utils/operationLog.mjs'
 
 import './services/telegramNotifier.mjs'
 import './workers/cloudWorker.mjs'
@@ -22,8 +24,10 @@ const PORT = process.env.PORT || 3001
 app.use(cors())
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
+app.use(operationLogMiddleware)
 
 await ensureAuthConfig()
+await cleanupExpiredOperationLogs()
 
 app.use('/api/auth', authRouter)
 app.use('/api', (req, res, next) => {
@@ -36,6 +40,7 @@ app.use('/api/cloud/:accountId', cloudRouter)
 app.use('/api/dns/:dnsAccountId', dnsRouter)
 app.use('/api/tasks', tasksRouter)
 app.use('/api/settings', settingsRouter)
+app.use('/api/logs', logsRouter)
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() })

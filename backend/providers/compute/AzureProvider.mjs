@@ -98,7 +98,7 @@ async function loadAzureSdk() {
 
 export default class AzureProvider extends BaseComputeProvider {
   static providerName = 'azure'
-  static capabilities = ['switch_ip', 'allow_all_inbound_traffic']
+  static capabilities = ['switch_ip', 'switch_ipv6', 'allow_all_inbound_traffic']
 
   constructor(account) {
     super(account)
@@ -626,7 +626,43 @@ export default class AzureProvider extends BaseComputeProvider {
     })
   }
 
-  async switchPublicIp(instanceId) {
+  _resolveSwitchIpTypes(options = {}) {
+    const ipTypes = Array.isArray(options.ipTypes) && options.ipTypes.length ? options.ipTypes : ['ipv4']
+    return {
+      switchIpv4: ipTypes.includes('ipv4'),
+      switchIpv6: ipTypes.includes('ipv6')
+    }
+  }
+
+  async _findIpConfigurationForVersion(nic, ipVersion) {
+    const configs = nic.ipConfigurations || []
+    const target = String(ipVersion).toUpperCase()
+
+    if (target === 'IPV4') {
+      return configs.find((item) => item.primary && String(item.privateIPAddressVersion || 'IPv4').toUpperCase() !== 'IPV6') ||
+        configs.find((item) => String(item.privateIPAddressVersion || 'IPv4').toUpperCase() !== 'IPV6') ||
+        configs.find((item) => item.primary) ||
+        configs[0] ||
+        null
+    }
+
+    for (const config of configs) {
+      if (String(config.privateIPAddressVersion || '').toUpperCase() === 'IPV6') {
+        return config
+      }
+
+      if (config.publicIPAddress?.id) {
+        const publicIp = await this._getPublicIpById(config.publicIPAddress.id).catch(() => null)
+        if (String(publicIp?.publicIPAddressVersion || '').toUpperCase() === 'IPV6') {
+          return config
+        }
+      }
+    }
+
+    return null
+  }
+
+  async _switchPublicIpVersion(instanceId, ipVersion) {
     await this._ensureInitialized()
     const vm = await this.getInstance(instanceId)
     const rawVm = vm.raw
@@ -637,25 +673,31 @@ export default class AzureProvider extends BaseComputeProvider {
     }
 
     const nic = await this._getNicById(primaryNicRef.id)
-    const ipConfig = nic.ipConfigurations?.find((item) => item.primary) || nic.ipConfigurations?.[0]
+    const normalizedVersion = String(ipVersion).toLowerCase() === 'ipv6' ? 'IPv6' : 'IPv4'
+    const ipConfig = await this._findIpConfigurationForVersion(nic, normalizedVersion)
     if (!ipConfig) {
-      throw new Error('Azure 网卡缺少 IP 配置')
+      throw new Error(`Azure 网卡缺少 ${normalizedVersion} IP 配置`)
     }
 
     const oldPublicIpId = ipConfig.publicIPAddress?.id || ''
     const oldPublicIp = oldPublicIpId ? await this._getPublicIpById(oldPublicIpId).catch(() => null) : null
+    const oldPublicIpVersion = String(oldPublicIp?.publicIPAddressVersion || normalizedVersion).toUpperCase()
+    if (oldPublicIp && oldPublicIpVersion !== normalizedVersion.toUpperCase()) {
+      throw new Error(`Azure 当前公网 IP 不是 ${normalizedVersion}`)
+    }
+
     const publicIpParsed = oldPublicIpId ? parseAzureResourceId(oldPublicIpId) : parseAzureResourceId(nic.id)
     const nicParsed = parseAzureResourceId(nic.id)
-    const publicIpName = `${safeName(rawVm.name || nic.name || 'vm')}-pip-${randomSuffix(5)}`
+    const publicIpName = `${safeName(rawVm.name || nic.name || 'vm')}-pip-${normalizedVersion.toLowerCase()}-${randomSuffix(5)}`
 
     const newPublicIp = await this.networkClient.publicIPAddresses.beginCreateOrUpdateAndWait(
       publicIpParsed.resourceGroup || nicParsed.resourceGroup,
       publicIpName,
       {
         location: nic.location || rawVm.location,
-        publicIPAllocationMethod: 'Static',
-        publicIPAddressVersion: 'IPv4',
-        sku: { name: 'Standard' },
+        publicIPAllocationMethod: oldPublicIp?.publicIPAllocationMethod || 'Static',
+        publicIPAddressVersion: normalizedVersion,
+        sku: { name: oldPublicIp?.sku?.name || 'Standard' },
         tags: { managedBy: 'cloud-manager', rotatedFrom: oldPublicIp?.name || '' }
       }
     )
@@ -671,9 +713,37 @@ export default class AzureProvider extends BaseComputeProvider {
       }
     }
 
+    if (normalizedVersion === 'IPv6') {
+      return {
+        newIpv6: newPublicIp.ipAddress,
+        oldIpv6: oldPublicIp?.ipAddress || null
+      }
+    }
+
     return {
-      newIp: newPublicIp.ipAddress,
-      oldIp: oldPublicIp?.ipAddress || null
+      newIpv4: newPublicIp.ipAddress,
+      oldIpv4: oldPublicIp?.ipAddress || null
+    }
+  }
+
+  async switchPublicIp(instanceId, options = {}) {
+    const { switchIpv4, switchIpv6 } = this._resolveSwitchIpTypes(options)
+    const result = { switchedTypes: [] }
+
+    if (switchIpv4) {
+      Object.assign(result, await this._switchPublicIpVersion(instanceId, 'ipv4'))
+      result.switchedTypes.push('ipv4')
+    }
+
+    if (switchIpv6) {
+      Object.assign(result, await this._switchPublicIpVersion(instanceId, 'ipv6'))
+      result.switchedTypes.push('ipv6')
+    }
+
+    return {
+      ...result,
+      newIp: result.newIpv4 || result.newIpv6 || null,
+      oldIp: result.oldIpv4 || result.oldIpv6 || null
     }
   }
 

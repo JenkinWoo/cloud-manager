@@ -59,6 +59,7 @@ docker compose ps
 - DNS 账户
 - 任务队列
 - 系统设置
+- 系统日志
 
 宿主机目录：
 
@@ -73,6 +74,27 @@ docker compose ps
 ```
 
 删除容器后，只要没有删除宿主机的 `backend/data`，数据就会保留。
+
+## 环境变量
+
+`docker-compose.yml` 默认配置了 `NODE_ENV` 和 `PORT`。如需调整后端行为，可以在 `environment` 中增加或覆盖以下变量：
+
+| 变量名 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | `3001` | 后端服务监听端口，修改后需要同步调整端口映射。 |
+| `AUTH_USERNAME` | `admin` | 首次初始化登录账户时使用的默认用户名。 |
+| `AUTH_PASSWORD` | `admin123` | 首次初始化登录账户时使用的默认密码。 |
+| `CLOUD_READ_TIMEOUT_MS` | `8000` | 云资源读取接口的超时时间，单位毫秒。 |
+| `OPERATION_LOG_MAX` | `1000` | 操作日志最多保留条数；系统设置中的日志保留天数会同时生效，默认保留最近 30 天。 |
+
+示例：
+
+```yaml
+environment:
+  NODE_ENV: production
+  PORT: 3001
+  OPERATION_LOG_MAX: 2000
+```
 
 ## 直接使用 Docker 命令
 

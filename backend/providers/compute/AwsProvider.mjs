@@ -9,16 +9,18 @@ import {
   DescribeAddressesCommand,
   AllocateAddressCommand,
   AssociateAddressCommand,
+  AssignIpv6AddressesCommand,
   ReleaseAddressCommand,
   DescribeImagesCommand,
   AuthorizeSecurityGroupIngressCommand,
-  DescribeKeyPairsCommand
+  DescribeKeyPairsCommand,
+  UnassignIpv6AddressesCommand
 } from '@aws-sdk/client-ec2'
 import BaseComputeProvider from './BaseComputeProvider.mjs'
 
 export default class AwsProvider extends BaseComputeProvider {
   static providerName = 'aws'
-  static capabilities = ['elastic_ip', 'switch_ip', 'security_groups', 'allow_all_inbound_traffic']
+  static capabilities = ['elastic_ip', 'switch_ip', 'switch_ipv6', 'security_groups', 'allow_all_inbound_traffic']
 
   constructor(account) {
     super(account)
@@ -98,10 +100,24 @@ export default class AwsProvider extends BaseComputeProvider {
     return { instanceId, action }
   }
 
-  async switchPublicIp(instanceId, dnsRecord) {
+  _resolveSwitchIpTypes(options = {}) {
+    const ipTypes = Array.isArray(options.ipTypes) && options.ipTypes.length ? options.ipTypes : ['ipv4']
+    return {
+      switchIpv4: ipTypes.includes('ipv4'),
+      switchIpv6: ipTypes.includes('ipv6')
+    }
+  }
+
+  _getPrimaryNetworkInterface(instance) {
+    const interfaces = instance.NetworkInterfaces || []
+    return interfaces.find((item) => item.Attachment?.DeviceIndex === 0) || interfaces[0] || null
+  }
+
+  async _switchIpv4(instanceId, instance = null) {
     // Find the current elastic IP associated to the instance
     const addrs = await this.client.send(new DescribeAddressesCommand({}))
     const oldAddr = addrs.Addresses.find(a => a.InstanceId === instanceId)
+    const oldIpv4 = oldAddr?.PublicIp || instance?.PublicIpAddress || null
 
     // Allocate new
     const alloc = await this.client.send(new AllocateAddressCommand({ Domain: 'vpc' }))
@@ -116,7 +132,63 @@ export default class AwsProvider extends BaseComputeProvider {
       await this.client.send(new ReleaseAddressCommand({ AllocationId: oldAddr.AllocationId }))
     }
 
-    return { newIp: newPublicIp, oldIp: oldAddr?.PublicIp || null }
+    return { newIpv4: newPublicIp, oldIpv4 }
+  }
+
+  async _switchIpv6(instance) {
+    const networkInterface = this._getPrimaryNetworkInterface(instance)
+    if (!networkInterface?.NetworkInterfaceId) {
+      throw new Error('AWS 实例未绑定网卡，无法切换 IPv6')
+    }
+
+    const oldIpv6s = (networkInterface.Ipv6Addresses || [])
+      .map((item) => item.Ipv6Address)
+      .filter(Boolean)
+
+    const assigned = await this.client.send(new AssignIpv6AddressesCommand({
+      NetworkInterfaceId: networkInterface.NetworkInterfaceId,
+      Ipv6AddressCount: 1
+    }))
+    const newIpv6 = assigned.AssignedIpv6Addresses?.[0]
+    if (!newIpv6) {
+      throw new Error('AWS 未返回新的 IPv6 地址')
+    }
+
+    if (oldIpv6s.length) {
+      await this.client.send(new UnassignIpv6AddressesCommand({
+        NetworkInterfaceId: networkInterface.NetworkInterfaceId,
+        Ipv6Addresses: oldIpv6s
+      }))
+    }
+
+    return {
+      newIpv6,
+      oldIpv6: oldIpv6s[0] || null,
+      oldIpv6s
+    }
+  }
+
+  async switchPublicIp(instanceId, options = {}) {
+    const { switchIpv4, switchIpv6 } = this._resolveSwitchIpTypes(options)
+    const instance = await this.getInstance(instanceId)
+    const rawInstance = instance.raw
+    const result = { switchedTypes: [] }
+
+    if (switchIpv4) {
+      Object.assign(result, await this._switchIpv4(instanceId, rawInstance))
+      result.switchedTypes.push('ipv4')
+    }
+
+    if (switchIpv6) {
+      Object.assign(result, await this._switchIpv6(rawInstance))
+      result.switchedTypes.push('ipv6')
+    }
+
+    return {
+      ...result,
+      newIp: result.newIpv4 || result.newIpv6 || null,
+      oldIp: result.oldIpv4 || result.oldIpv6 || null
+    }
   }
 
   async listElasticIps() {
@@ -166,13 +238,32 @@ export default class AwsProvider extends BaseComputeProvider {
   }
 
   static normalizeInstance(raw, region) {
+    const publicIps = new Set()
+    const privateIps = new Set()
+    const ipv6Addresses = new Set()
+
+    if (raw.PublicIpAddress) publicIps.add(raw.PublicIpAddress)
+    if (raw.PrivateIpAddress) privateIps.add(raw.PrivateIpAddress)
+
+    for (const item of raw.NetworkInterfaces || []) {
+      if (item.Association?.PublicIp) publicIps.add(item.Association.PublicIp)
+      if (item.PrivateIpAddress) privateIps.add(item.PrivateIpAddress)
+      for (const privateIp of item.PrivateIpAddresses || []) {
+        if (privateIp.PrivateIpAddress) privateIps.add(privateIp.PrivateIpAddress)
+        if (privateIp.Association?.PublicIp) publicIps.add(privateIp.Association.PublicIp)
+      }
+      for (const ipv6 of item.Ipv6Addresses || []) {
+        if (ipv6.Ipv6Address) ipv6Addresses.add(ipv6.Ipv6Address)
+      }
+    }
+
     return {
       id: raw.InstanceId,
       displayName: raw.Tags?.find(t => t.Key === 'Name')?.Value || raw.InstanceId,
       state: raw.State?.Name?.toUpperCase() || 'UNKNOWN',
-      publicIps: raw.PublicIpAddress ? [raw.PublicIpAddress] : [],
-      privateIps: raw.PrivateIpAddress ? [raw.PrivateIpAddress] : [],
-      ipv6Addresses: [],
+      publicIps: Array.from(publicIps),
+      privateIps: Array.from(privateIps),
+      ipv6Addresses: Array.from(ipv6Addresses),
       region,
       zone: raw.Placement?.AvailabilityZone || region,
       shape: raw.InstanceType,

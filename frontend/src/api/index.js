@@ -35,6 +35,18 @@ api.interceptors.response.use(
   }
 )
 
+function logTargetConfig(logTarget, config = {}) {
+  if (!logTarget) return config
+
+  return {
+    ...config,
+    headers: {
+      ...(config.headers || {}),
+      'X-Operation-Target': encodeURIComponent(JSON.stringify(logTarget))
+    }
+  }
+}
+
 export const accountsApi = {
   list: () => api.get('/accounts'),
   create: (data) => api.post('/accounts', data),
@@ -51,23 +63,28 @@ export const accountsApi = {
 export const cloudApi = {
   listInstances: (accountId, params = {}) => api.get(`/cloud/${accountId}/instances`, { params }),
   getInstance: (accountId, instanceId, params = {}) => api.get(`/cloud/${accountId}/instances/${instanceId}`, { params }),
-  createInstance: (accountId, data) => api.post(`/cloud/${accountId}/instances`, data),
-  instanceAction: (accountId, instanceId, action, data = {}) =>
-    api.post(`/cloud/${accountId}/instances/${instanceId}/action`, { action, ...data }),
-  deleteInstance: (accountId, instanceId, params = {}) =>
-    api.delete(`/cloud/${accountId}/instances/${instanceId}`, { params }),
-  switchIp: (accountId, instanceId, data) =>
-    api.post(`/cloud/${accountId}/instances/${instanceId}/switch-ip`, data),
-  addIpv6: (accountId, instanceId, data = {}) => api.post(`/cloud/${accountId}/instances/${instanceId}/add-ipv6`, data),
+  createInstance: (accountId, data, logTarget) =>
+    api.post(`/cloud/${accountId}/instances`, data, logTargetConfig(logTarget)),
+  instanceAction: (accountId, instanceId, action, data = {}, logTarget) =>
+    api.post(`/cloud/${accountId}/instances/${instanceId}/action`, { action, ...data }, logTargetConfig(logTarget)),
+  deleteInstance: (accountId, instanceId, params = {}, logTarget) =>
+    api.delete(`/cloud/${accountId}/instances/${instanceId}`, logTargetConfig(logTarget, { params })),
+  switchIp: (accountId, instanceId, data, logTarget) =>
+    api.post(`/cloud/${accountId}/instances/${instanceId}/switch-ip`, data, logTargetConfig(logTarget)),
+  addIpv6: (accountId, instanceId, data = {}, logTarget) =>
+    api.post(`/cloud/${accountId}/instances/${instanceId}/add-ipv6`, data, logTargetConfig(logTarget)),
   listElasticIps: (accountId, params = {}) => api.get(`/cloud/${accountId}/elastic-ips`, { params }),
   releaseUnused: (accountId, data = {}) => api.post(`/cloud/${accountId}/elastic-ips/release-unused`, data),
   capabilities: (accountId, params = {}) => api.get(`/cloud/${accountId}/capabilities`, { params }),
-  modifyShape: (accountId, instanceId, data) =>
-    api.put(`/cloud/${accountId}/instances/${instanceId}/shape`, data),
-  allowAllFirewall: (accountId, instanceId, data = {}) =>
-    api.post(`/cloud/${accountId}/instances/${instanceId}/firewall/allow-all`, data),
+  modifyShape: (accountId, instanceId, data, logTarget) =>
+    api.put(`/cloud/${accountId}/instances/${instanceId}/shape`, data, logTargetConfig(logTarget)),
+  allowAllFirewall: (accountId, instanceId, data = {}, logTarget) =>
+    api.post(`/cloud/${accountId}/instances/${instanceId}/firewall/allow-all`, data, logTargetConfig(logTarget)),
   listVolumes: (accountId, params = {}) => api.get(`/cloud/${accountId}/volumes`, { params }),
-  deleteVolume: (accountId, volumeId, params = {}) => api.delete(`/cloud/${accountId}/volumes/${volumeId}`, { params }),
+  resizeVolume: (accountId, volumeId, data, logTarget) =>
+    api.put(`/cloud/${accountId}/volumes/${volumeId}/size`, data, logTargetConfig(logTarget)),
+  deleteVolume: (accountId, volumeId, params = {}, logTarget) =>
+    api.delete(`/cloud/${accountId}/volumes/${volumeId}`, logTargetConfig(logTarget, { params })),
   setupNetwork: (accountId, data = {}) => api.post(`/cloud/${accountId}/network/setup`, data),
   listAzureSubscriptions: (accountId) => api.get(`/cloud/${accountId}/azure/subscriptions`),
   listAzureLocations: (accountId, params = {}) => api.get(`/cloud/${accountId}/azure/locations`, { params }),
@@ -87,7 +104,13 @@ export const tasksApi = {
 
 export const settingsApi = {
   get: () => api.get('/settings'),
-  updateTelegram: (data) => api.put('/settings/telegram', data)
+  updateTelegram: (data) => api.put('/settings/telegram', data),
+  updateOperationLogs: (data) => api.put('/settings/operation-logs', data)
+}
+
+export const logsApi = {
+  list: (params) => api.get('/logs', { params }),
+  cleanup: (data) => api.post('/logs/cleanup', data)
 }
 
 export const authApi = {

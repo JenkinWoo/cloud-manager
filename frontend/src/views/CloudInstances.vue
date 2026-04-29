@@ -89,26 +89,30 @@
                 <span class="info-label">实例 ID</span>
                 <span class="info-value info-mono" :title="instance.id">{{ shortText(instance.id) }}</span>
               </div>
-              <div class="info-row" v-if="instance.cpu || instance.memoryGb">
+              <div class="info-row">
                 <span class="info-label">配置</span>
-                <span class="info-value">{{ formatConfig(instance) }}</span>
+                <span class="info-value">{{ formatConfig(instance) || '-' }}</span>
               </div>
-              <div class="info-row" v-if="instance.publicIps?.length">
+              <div class="info-row">
                 <span class="info-label">公网 IP</span>
-                <div class="ip-list">
+                <div v-if="instance.publicIps?.length" class="ip-list">
                   <span v-for="ip in instance.publicIps" :key="ip" class="ip-tag">{{ ip }}</span>
                 </div>
+                <span v-else class="info-value">-</span>
               </div>
-              <div class="info-row" v-if="instance.privateIps?.length">
+              <div class="info-row">
                 <span class="info-label">私网 IP</span>
-                <div class="ip-list">
+                <div v-if="instance.privateIps?.length" class="ip-list">
                   <span v-for="ip in instance.privateIps" :key="ip" class="ip-tag ip-tag-muted">{{ ip }}</span>
                 </div>
+                <span v-else class="info-value">-</span>
               </div>
-              <div class="info-row" v-if="instance.ipv6Addresses?.length">
+              <div class="info-row">
                 <span class="info-label">IPv6</span>
-                <span class="info-value" :title="instance.ipv6Addresses[0]">{{ shortText(instance.ipv6Addresses[0], 26)
-                  }}</span>
+                <div v-if="instance.ipv6Addresses?.length" class="ip-list">
+                  <span v-for="ip in instance.ipv6Addresses" :key="ip" class="ip-tag">{{ shortText(ip, 26) }}</span>
+                </div>
+                <span v-else class="info-value">-</span>
               </div>
             </div>
 
@@ -127,7 +131,7 @@
                 @click="runAction(instance, 'REBOOT')">
                 重启
               </button>
-              <button v-if="hasCapability('switch_ip') || hasCapability('elastic_ip')" class="btn btn-ghost btn-sm"
+              <button v-if="canSwitchAnyIp()" class="btn btn-ghost btn-sm"
                 @click="openSwitchIp(instance)">
                 切换 IP
               </button>
@@ -301,10 +305,26 @@
     <div v-if="showSwitchIpModal" class="modal-overlay" @click.self="closeSwitchIp">
       <div class="modal">
         <div class="modal-header">
-          <h3>切换公网 IP</h3>
+          <h3>切换 IP</h3>
           <button class="modal-close" @click="closeSwitchIp">x</button>
         </div>
         <p class="modal-desc">实例：{{ selectedInstance?.displayName || selectedInstance?.id || '-' }}</p>
+        <div class="form-group">
+          <label>切换类型</label>
+          <div class="checkbox-group">
+            <label :class="['checkbox-item', !canSwitchIpv4() ? 'disabled' : '']">
+              <input v-model="switchIpForm.ipTypes" type="checkbox" value="ipv4"
+                :disabled="switchingIp || !canSwitchIpv4()" />
+              <span>IPv4</span>
+            </label>
+            <label :class="['checkbox-item', !canSwitchIpv6() ? 'disabled' : '']">
+              <input v-model="switchIpForm.ipTypes" type="checkbox" value="ipv6"
+                :disabled="switchingIp || !canSwitchIpv6()" />
+              <span>IPv6</span>
+            </label>
+          </div>
+          <small class="form-hint">可单独切换 IPv4、IPv6，或同时选择两个类型。</small>
+        </div>
         <div class="form-group">
           <label>同步更新 DNS 账户（可选）</label>
           <select v-model="switchIpForm.dnsAccountId" class="form-control">
@@ -315,6 +335,7 @@
         <div class="form-group">
           <label>记录名</label>
           <input v-model="switchIpForm.dnsRecord" class="form-control" placeholder="例如 www.frp.gs" />
+          <small class="form-hint">选择 IPv4 会更新 A 记录，选择 IPv6 会更新 AAAA 记录。</small>
         </div>
         <div class="modal-footer">
           <button class="btn btn-ghost" @click="closeSwitchIp">取消</button>
@@ -379,10 +400,41 @@
                 <td>{{ volume.sizeInGBs }} GB</td>
                 <td>{{ volume.state }}</td>
                 <td class="info-mono">{{ shortText(volume.id) }}</td>
-                <td><button class="btn btn-danger btn-sm" @click="deleteVolume(volume.id)">删除</button></td>
+                <td>
+                  <div class="action-row">
+                    <button v-if="hasCapability('resize_boot_volume')" class="btn btn-ghost btn-sm"
+                      @click="openResizeVolume(volume)">
+                      修改大小
+                    </button>
+                    <button class="btn btn-danger btn-sm" @click="deleteVolume(volume)">删除</button>
+                  </div>
+                </td>
               </tr>
             </tbody>
           </table>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showVolumeSizeModal" class="modal-overlay" @click.self="closeVolumeSize">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>修改引导卷大小</h3>
+          <button class="modal-close" @click="closeVolumeSize">x</button>
+        </div>
+        <p class="modal-desc">当前容量：{{ selectedVolume?.sizeInGBs || '-' }} GB</p>
+        <div class="form-group">
+          <label>新容量 (GB)</label>
+          <input v-model.number="volumeSizeForm.sizeInGBs" type="number" class="form-control"
+            :min="(selectedVolume?.sizeInGBs || 0) + 1" step="1" :disabled="resizingVolume"
+            @keyup.enter="confirmResizeVolume" />
+          <small class="form-hint">OCI 仅支持扩容，新容量必须大于当前容量。</small>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" @click="closeVolumeSize">取消</button>
+          <button class="btn btn-primary" :disabled="resizingVolume" @click="confirmResizeVolume">
+            {{ resizingVolume ? '提交中...' : '确认修改' }}
+          </button>
         </div>
       </div>
     </div>
@@ -413,18 +465,22 @@ const showCreateModal = ref(false)
 const showSwitchIpModal = ref(false)
 const showShapeModal = ref(false)
 const showVolumesModal = ref(false)
+const showVolumeSizeModal = ref(false)
 
 const selectedInstance = ref(null)
+const selectedVolume = ref(null)
 const creating = ref(false)
 const switchingIp = ref(false)
 const modifyingShape = ref(false)
 const settingUpNetwork = ref(false)
 const loadingVolumes = ref(false)
+const resizingVolume = ref(false)
 
 const volumes = ref([])
 const createForm = ref({})
-const switchIpForm = ref({ dnsAccountId: '', dnsRecord: '' })
+const switchIpForm = ref({ ipTypes: ['ipv4'], dnsAccountId: '', dnsRecord: '' })
 const shapeForm = ref({ ocpus: 1, memoryGb: 6 })
+const volumeSizeForm = ref({ sizeInGBs: 0 })
 
 const selectedAccount = computed(() => accounts.value.find((item) => item.id === selectedAccountId.value) || null)
 const isAzureAccount = computed(() => selectedAccount.value?.computeProvider === 'azure')
@@ -469,10 +525,13 @@ function resetTransientState() {
   showSwitchIpModal.value = false
   showShapeModal.value = false
   showVolumesModal.value = false
+  showVolumeSizeModal.value = false
   selectedInstance.value = null
+  selectedVolume.value = null
   createForm.value = {}
-  switchIpForm.value = { dnsAccountId: '', dnsRecord: '' }
+  switchIpForm.value = { ipTypes: ['ipv4'], dnsAccountId: '', dnsRecord: '' }
   shapeForm.value = { ocpus: 1, memoryGb: 6 }
+  volumeSizeForm.value = { sizeInGBs: 0 }
   volumes.value = []
 }
 
@@ -499,6 +558,27 @@ function getRequestBody(extra = {}) {
     return { ...extra, subscriptionId: azureSubscriptionId.value }
   }
   return extra
+}
+
+function getAccountLogTarget(targetName = '') {
+  return {
+    accountName: selectedAccount.value?.name || '',
+    targetName
+  }
+}
+
+function getInstanceLogTarget(instance) {
+  return {
+    accountName: selectedAccount.value?.name || '',
+    instanceName: instance?.displayName || instance?.name || ''
+  }
+}
+
+function getVolumeLogTarget(volume) {
+  return {
+    accountName: selectedAccount.value?.name || '',
+    volumeName: volume?.displayName || volume?.name || ''
+  }
 }
 
 function pickDefaultLocation(locations = []) {
@@ -671,6 +751,24 @@ function hasCapability(capability) {
   return capabilities.value.includes(capability)
 }
 
+function canSwitchIpv4() {
+  return hasCapability('switch_ip') || hasCapability('elastic_ip')
+}
+
+function canSwitchIpv6() {
+  return hasCapability('switch_ipv6')
+}
+
+function canSwitchAnyIp() {
+  return canSwitchIpv4() || canSwitchIpv6()
+}
+
+function defaultSwitchIpTypes() {
+  if (canSwitchIpv4()) return ['ipv4']
+  if (canSwitchIpv6()) return ['ipv6']
+  return []
+}
+
 async function openCreate() {
   if (!selectedAccount.value) {
     toast('请先选择计算账户', 'error')
@@ -748,7 +846,7 @@ async function submitCreate() {
 
   creating.value = true
   try {
-    await cloudApi.createInstance(selectedAccountId.value, getRequestBody(createForm.value))
+    await cloudApi.createInstance(selectedAccountId.value, getRequestBody(createForm.value), getAccountLogTarget('新建实例'))
     toast('创建任务已加入队列，请到任务队列查看进度', 'success')
     closeCreate()
   } catch (error) {
@@ -760,7 +858,7 @@ async function submitCreate() {
 
 async function runAction(instance, action) {
   try {
-    await cloudApi.instanceAction(selectedAccountId.value, instance.id, action, getRequestBody())
+    await cloudApi.instanceAction(selectedAccountId.value, instance.id, action, getRequestBody(), getInstanceLogTarget(instance))
     toast(`${actionLabel(action)}指令已发送`, 'success')
     setTimeout(refreshCurrent, 1500)
   } catch (error) {
@@ -773,7 +871,7 @@ async function terminate(instance) {
   if (!ok) return
 
   try {
-    await cloudApi.deleteInstance(selectedAccountId.value, instance.id, getRequestParams())
+    await cloudApi.deleteInstance(selectedAccountId.value, instance.id, getRequestParams(), getInstanceLogTarget(instance))
     toast('实例删除请求已发送', 'success')
     await refreshCurrent()
   } catch (error) {
@@ -783,7 +881,7 @@ async function terminate(instance) {
 
 function openSwitchIp(instance) {
   selectedInstance.value = instance
-  switchIpForm.value = { dnsAccountId: '', dnsRecord: '' }
+  switchIpForm.value = { ipTypes: defaultSwitchIpTypes(), dnsAccountId: '', dnsRecord: '' }
   showSwitchIpModal.value = true
 }
 
@@ -792,16 +890,27 @@ function closeSwitchIp() {
 }
 
 async function confirmSwitchIp() {
+  const ipTypes = Array.isArray(switchIpForm.value.ipTypes) ? switchIpForm.value.ipTypes : []
+  if (!ipTypes.length) {
+    toast('请选择至少一种 IP 类型', 'error')
+    return
+  }
+
   switchingIp.value = true
   try {
-    const payload = getRequestBody()
+    const payload = getRequestBody({ ipTypes })
     if (switchIpForm.value.dnsAccountId && switchIpForm.value.dnsRecord) {
       payload.dnsAccountId = switchIpForm.value.dnsAccountId
       payload.dnsRecord = switchIpForm.value.dnsRecord
     }
 
-    const response = await cloudApi.switchIp(selectedAccountId.value, selectedInstance.value.id, payload)
-    toast(`IP 已切换为 ${response.data.newIp || response.data.newPublicIp}`, 'success')
+    const response = await cloudApi.switchIp(
+      selectedAccountId.value,
+      selectedInstance.value.id,
+      payload,
+      getInstanceLogTarget(selectedInstance.value)
+    )
+    toast(formatSwitchIpResult(response.data), 'success')
     closeSwitchIp()
     await refreshCurrent()
   } catch (error) {
@@ -811,9 +920,17 @@ async function confirmSwitchIp() {
   }
 }
 
+function formatSwitchIpResult(data = {}) {
+  const parts = []
+  if (data.newIpv4) parts.push(`IPv4 ${data.newIpv4}`)
+  if (data.newIpv6) parts.push(`IPv6 ${data.newIpv6}`)
+  if (!parts.length && (data.newIp || data.newPublicIp)) parts.push(data.newIp || data.newPublicIp)
+  return parts.length ? `IP 已切换为 ${parts.join(' / ')}` : 'IP 切换请求已发送'
+}
+
 async function addIpv6(instance) {
   try {
-    await cloudApi.addIpv6(selectedAccountId.value, instance.id, getRequestBody())
+    await cloudApi.addIpv6(selectedAccountId.value, instance.id, getRequestBody(), getInstanceLogTarget(instance))
     toast('IPv6 已添加', 'success')
     await refreshCurrent()
   } catch (error) {
@@ -840,7 +957,12 @@ async function confirmModifyShape() {
 
   modifyingShape.value = true
   try {
-    await cloudApi.modifyShape(selectedAccountId.value, selectedInstance.value.id, getRequestBody(shapeForm.value))
+    await cloudApi.modifyShape(
+      selectedAccountId.value,
+      selectedInstance.value.id,
+      getRequestBody(shapeForm.value),
+      getInstanceLogTarget(selectedInstance.value)
+    )
     toast('配置修改请求已发送', 'success')
     closeShape()
     await refreshCurrent()
@@ -856,7 +978,7 @@ async function allowAllFirewall(instance) {
   if (!ok) return
 
   try {
-    await cloudApi.allowAllFirewall(selectedAccountId.value, instance.id, getRequestBody())
+    await cloudApi.allowAllFirewall(selectedAccountId.value, instance.id, getRequestBody(), getInstanceLogTarget(instance))
     toast('防火墙规则已放通', 'success')
   } catch (error) {
     toast(error.response?.data?.error || error.message, 'error')
@@ -908,14 +1030,65 @@ async function openVolumesModal() {
 
 function closeVolumes() {
   showVolumesModal.value = false
+  closeVolumeSize()
 }
 
-async function deleteVolume(volumeId) {
+function openResizeVolume(volume) {
+  selectedVolume.value = volume
+  volumeSizeForm.value = {
+    sizeInGBs: Number(volume.sizeInGBs || 0) + 1
+  }
+  showVolumeSizeModal.value = true
+}
+
+function closeVolumeSize() {
+  showVolumeSizeModal.value = false
+  selectedVolume.value = null
+  volumeSizeForm.value = { sizeInGBs: 0 }
+}
+
+async function confirmResizeVolume() {
+  const currentSizeInGBs = Number(selectedVolume.value?.sizeInGBs || 0)
+  const nextSizeInGBs = Number(volumeSizeForm.value.sizeInGBs)
+
+  if (resizingVolume.value) return
+  if (!selectedVolume.value) return
+  if (!Number.isInteger(nextSizeInGBs) || nextSizeInGBs <= 0) {
+    toast('引导卷容量必须是大于 0 的整数 GB', 'error')
+    return
+  }
+  if (currentSizeInGBs && nextSizeInGBs <= currentSizeInGBs) {
+    toast(`新容量必须大于当前容量 ${currentSizeInGBs} GB`, 'error')
+    return
+  }
+
+  const ok = window.confirm(`确认将该引导卷扩容到 ${nextSizeInGBs} GB 吗？`)
+  if (!ok) return
+
+  resizingVolume.value = true
+  try {
+    await cloudApi.resizeVolume(
+      selectedAccountId.value,
+      selectedVolume.value.id,
+      getRequestBody({ sizeInGBs: nextSizeInGBs }),
+      getVolumeLogTarget(selectedVolume.value)
+    )
+    toast('引导卷大小修改请求已发送', 'success')
+    closeVolumeSize()
+    await openVolumesModal()
+  } catch (error) {
+    toast(error.response?.data?.error || error.message, 'error')
+  } finally {
+    resizingVolume.value = false
+  }
+}
+
+async function deleteVolume(volume) {
   const ok = window.confirm('确认删除该引导卷吗？')
   if (!ok) return
 
   try {
-    await cloudApi.deleteVolume(selectedAccountId.value, volumeId, getRequestParams())
+    await cloudApi.deleteVolume(selectedAccountId.value, volume.id, getRequestParams(), getVolumeLogTarget(volume))
     toast('引导卷删除请求已发送', 'success')
     await openVolumesModal()
   } catch (error) {
@@ -1152,6 +1325,33 @@ function validateOraclePassword(password) {
   margin-top: 6px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.checkbox-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.checkbox-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkbox-item input {
+  accent-color: var(--accent);
+}
+
+.checkbox-item.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .modal-desc {

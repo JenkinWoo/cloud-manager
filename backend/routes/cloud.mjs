@@ -27,6 +27,56 @@ function getScopedProvider(account, req) {
   return provider
 }
 
+function setOperationLogTarget(req, target) {
+  req.operationLogTarget = {
+    ...(req.operationLogTarget || {}),
+    ...target
+  }
+}
+
+function getInstanceDisplayName(instance) {
+  return instance?.displayName || instance?.name || ''
+}
+
+async function attachInstanceOperationLogTarget(req, account, provider) {
+  setOperationLogTarget(req, { accountName: account.name })
+
+  if (!req.params.instanceId || req.operationLogTarget.instanceName) return
+
+  try {
+    const instance = await withTimeout(
+      provider.getInstance(req.params.instanceId),
+      READ_TIMEOUT_MS,
+      `${account.computeProvider} 实例详情请求超时（>${READ_TIMEOUT_MS}ms）`
+    )
+    const instanceName = getInstanceDisplayName(instance)
+    if (instanceName) {
+      setOperationLogTarget(req, { instanceName })
+    }
+  } catch (_) {
+  }
+}
+
+function normalizeIpTypes(value) {
+  let items = []
+
+  if (Array.isArray(value)) {
+    items = value
+  } else if (typeof value === 'string') {
+    items = value.split(',')
+  } else if (value && typeof value === 'object') {
+    if (value.ipv4) items.push('ipv4')
+    if (value.ipv6) items.push('ipv6')
+  }
+
+  const normalized = items
+    .map((item) => String(item || '').trim().toLowerCase())
+    .flatMap((item) => (['all', 'both'].includes(item) ? ['ipv4', 'ipv6'] : [item]))
+    .filter((item) => ['ipv4', 'ipv6'].includes(item))
+
+  return Array.from(new Set(normalized.length ? normalized : ['ipv4']))
+}
+
 function withTimeout(promise, ms, message) {
   let timer = null
 
@@ -174,24 +224,38 @@ router.post('/instances/:instanceId/switch-ip', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
     const provider = getScopedProvider(account, req)
-    const providerCapabilities = provider.constructor.capabilities || []
+    await attachInstanceOperationLogTarget(req, account, provider)
 
-    if (!providerCapabilities.includes('switch_ip') && !providerCapabilities.includes('elastic_ip')) {
+    const providerCapabilities = provider.constructor.capabilities || []
+    const body = req.body || {}
+
+    const ipTypes = normalizeIpTypes(body.ipTypes ?? body.ipType ?? body.type)
+
+    if (ipTypes.includes('ipv4') && !providerCapabilities.includes('switch_ip') && !providerCapabilities.includes('elastic_ip')) {
       return res.status(400).json({ error: `${account.computeProvider} 不支持切换 IP` })
     }
+    if (ipTypes.includes('ipv6') && !providerCapabilities.includes('switch_ipv6')) {
+      return res.status(400).json({ error: `${account.computeProvider} 不支持切换 IPv6` })
+    }
 
-    const result = await provider.switchPublicIp(req.params.instanceId)
-    const { dnsAccountId, dnsRecord } = req.body
+    const result = await provider.switchPublicIp(req.params.instanceId, { ipTypes })
+    const { dnsAccountId, dnsRecord } = body
+    const dnsUpdates = []
 
     if (dnsAccountId && dnsRecord) {
       const dnsAccount = dnsAccountsDb.data.dnsAccounts.find((item) => item.id === dnsAccountId)
       if (dnsAccount) {
         const dnsProvider = getDnsProvider(dnsAccount)
-        await dnsProvider.upsertRecord(dnsRecord, result.newIp, 'A')
+        if (ipTypes.includes('ipv4') && result.newIpv4) {
+          dnsUpdates.push(await dnsProvider.upsertRecord(dnsRecord, result.newIpv4, 'A'))
+        }
+        if (ipTypes.includes('ipv6') && result.newIpv6) {
+          dnsUpdates.push(await dnsProvider.upsertRecord(dnsRecord, result.newIpv6, 'AAAA'))
+        }
       }
     }
 
-    res.json({ success: true, ...result })
+    res.json({ success: true, ...result, dnsUpdates })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -298,6 +362,21 @@ router.delete('/volumes/:volumeId', async (req, res) => {
     const account = requireAccount(req.params.accountId)
     const provider = getScopedProvider(account, req)
     res.json({ success: true, ...(await provider.deleteBootVolume(req.params.volumeId)) })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.put('/volumes/:volumeId/size', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    const provider = getScopedProvider(account, req)
+
+    if (!(provider.constructor.capabilities || []).includes('resize_boot_volume')) {
+      return res.status(400).json({ error: `${account.computeProvider} 不支持修改引导卷大小` })
+    }
+
+    res.json({ success: true, ...(await provider.resizeBootVolume(req.params.volumeId, req.body.sizeInGBs)) })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

@@ -35,6 +35,9 @@
             <span>⚙️</span> 任务队列
             <span v-if="pendingCount > 0" class="nav-badge">{{ pendingCount }}</span>
           </router-link>
+          <router-link to="/logs" class="nav-item">
+            <span>🧾</span> 系统日志
+          </router-link>
           <router-link to="/settings" class="nav-item">
             <span>🔧</span> 系统设置
           </router-link>

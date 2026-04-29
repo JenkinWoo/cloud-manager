@@ -13,7 +13,17 @@ async function loadOciSdk() {
 
 export default class OracleProvider extends BaseComputeProvider {
   static providerName = 'oracle'
-  static capabilities = ['switch_ip', 'ipv6', 'modify_config', 'list_boot_volumes', 'delete_boot_volume', 'create_network', 'allow_all_inbound_traffic']
+  static capabilities = [
+    'switch_ip',
+    'switch_ipv6',
+    'ipv6',
+    'modify_config',
+    'list_boot_volumes',
+    'delete_boot_volume',
+    'resize_boot_volume',
+    'create_network',
+    'allow_all_inbound_traffic'
+  ]
 
   constructor(account) {
     super(account)
@@ -253,11 +263,45 @@ export default class OracleProvider extends BaseComputeProvider {
     return { requestId: res.opcRequestId }
   }
 
-  async switchPublicIp(instanceId) {
-    await this._ensureInitialized()
+  _resolveSwitchIpTypes(options = {}) {
+    const ipTypes = Array.isArray(options.ipTypes) && options.ipTypes.length ? options.ipTypes : ['ipv4']
+    return {
+      switchIpv4: ipTypes.includes('ipv4'),
+      switchIpv6: ipTypes.includes('ipv6')
+    }
+  }
+
+  async _getPrimaryVnicAttachment(instanceId) {
     const vnics = await this.computeClient.listVnicAttachments({ compartmentId: this.compartmentId, instanceId })
     if (!vnics.items.length) throw new Error('找不到 VNIC')
-    const vnicDetails = await this.networkClient.getVnic({ vnicId: vnics.items[0].vnicId })
+    return vnics.items.find((item) => item.lifecycleState === 'ATTACHED') || vnics.items[0]
+  }
+
+  async _ensureVnicIpv6Ready(vnicAttachment) {
+    const { subnetId, vnicId } = vnicAttachment
+    const subnetRes = await this.networkClient.getSubnet({ subnetId })
+    const vcnId = subnetRes.subnet.vcnId
+
+    const vcnRes = await this.networkClient.getVcn({ vcnId })
+    if (!vcnRes.vcn.ipv6CidrBlock) {
+      await this.networkClient.addIpv6VcnCidr({ vcnId, addVcnIpv6CidrDetails: { isOracleGuaAllocationEnabled: true } })
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+    }
+
+    const updatedVcn = await this.networkClient.getVcn({ vcnId })
+    if (!subnetRes.subnet.ipv6CidrBlock) {
+      await this.networkClient.updateSubnet({
+        subnetId,
+        updateSubnetDetails: { ipv6CidrBlock: updatedVcn.vcn.ipv6CidrBlock?.replace('/56', '/64') }
+      })
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+    }
+
+    return { subnetId, vnicId }
+  }
+
+  async _switchIpv4(vnicId) {
+    const vnicDetails = await this.networkClient.getVnic({ vnicId })
 
     const oldIp = vnicDetails.vnic.publicIp
 
@@ -281,32 +325,78 @@ export default class OracleProvider extends BaseComputeProvider {
       }
     })
 
-    return { newIp: newIpRes.publicIp.ipAddress, oldIp }
+    return {
+      newIpv4: newIpRes.publicIp.ipAddress,
+      oldIpv4: oldIp || null
+    }
+  }
+
+  async _switchIpv6(vnicAttachment) {
+    await this._ensureVnicIpv6Ready(vnicAttachment)
+
+    const existingRes = await this.networkClient.listIpv6s({ vnicId: vnicAttachment.vnicId })
+    const existingIpv6s = (existingRes.items || []).filter((item) => item.lifecycleState !== 'TERMINATED')
+
+    const createIpv6 = () => this.networkClient.createIpv6({
+      createIpv6Details: { vnicId: vnicAttachment.vnicId }
+    })
+
+    let newIpv6Res = null
+    let cleanupIpv6s = existingIpv6s
+    try {
+      newIpv6Res = await createIpv6()
+    } catch (err) {
+      if (!existingIpv6s.length) throw err
+
+      for (const item of existingIpv6s) {
+        await this.networkClient.deleteIpv6({ ipv6Id: item.id })
+      }
+      cleanupIpv6s = []
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      newIpv6Res = await createIpv6()
+    }
+
+    const newIpv6 = newIpv6Res.ipv6
+    for (const item of cleanupIpv6s) {
+      if (item.id !== newIpv6.id) {
+        await this.networkClient.deleteIpv6({ ipv6Id: item.id })
+      }
+    }
+
+    return {
+      newIpv6: newIpv6.ipAddress,
+      oldIpv6: existingIpv6s[0]?.ipAddress || null,
+      oldIpv6s: existingIpv6s.map((item) => item.ipAddress).filter(Boolean)
+    }
+  }
+
+  async switchPublicIp(instanceId, options = {}) {
+    await this._ensureInitialized()
+    const { switchIpv4, switchIpv6 } = this._resolveSwitchIpTypes(options)
+    const vnicAttachment = await this._getPrimaryVnicAttachment(instanceId)
+    const result = { switchedTypes: [] }
+
+    if (switchIpv4) {
+      Object.assign(result, await this._switchIpv4(vnicAttachment.vnicId))
+      result.switchedTypes.push('ipv4')
+    }
+
+    if (switchIpv6) {
+      Object.assign(result, await this._switchIpv6(vnicAttachment))
+      result.switchedTypes.push('ipv6')
+    }
+
+    return {
+      ...result,
+      newIp: result.newIpv4 || result.newIpv6 || null,
+      oldIp: result.oldIpv4 || result.oldIpv6 || null
+    }
   }
 
   async addIpv6(instanceId) {
     await this._ensureInitialized()
-    const vnics = await this.computeClient.listVnicAttachments({ compartmentId: this.compartmentId, instanceId })
-    if (!vnics.items.length) throw new Error('找不到 VNIC')
-    const { vnicId, subnetId } = vnics.items[0]
-
-    const subnetRes = await this.networkClient.getSubnet({ subnetId })
-    const vcnId = subnetRes.subnet.vcnId
-
-    const vcnRes = await this.networkClient.getVcn({ vcnId })
-    if (!vcnRes.vcn.ipv6CidrBlock) {
-      await this.networkClient.addIpv6VcnCidr({ vcnId, addVcnIpv6CidrDetails: { isOracleGuaAllocationEnabled: true } })
-      await new Promise((resolve) => setTimeout(resolve, 3000))
-    }
-
-    const updatedVcn = await this.networkClient.getVcn({ vcnId })
-    if (!subnetRes.subnet.ipv6CidrBlock) {
-      await this.networkClient.updateSubnet({
-        subnetId,
-        updateSubnetDetails: { ipv6CidrBlock: updatedVcn.vcn.ipv6CidrBlock?.replace('/56', '/64') }
-      })
-      await new Promise((resolve) => setTimeout(resolve, 2000))
-    }
+    const vnicAttachment = await this._getPrimaryVnicAttachment(instanceId)
+    const { vnicId } = await this._ensureVnicIpv6Ready(vnicAttachment)
 
     const ipv6Res = await this.networkClient.createIpv6({ createIpv6Details: { vnicId } })
     return { ipAddress: ipv6Res.ipv6.ipAddress }
@@ -352,6 +442,38 @@ export default class OracleProvider extends BaseComputeProvider {
     await new Promise((resolve) => setTimeout(resolve, 5000))
     await this.blockClient.deleteBootVolume({ bootVolumeId })
     return { success: true }
+  }
+
+  async resizeBootVolume(bootVolumeId, sizeInGBs) {
+    await this._ensureInitialized()
+
+    const nextSizeInGBs = Number(sizeInGBs)
+    if (!Number.isInteger(nextSizeInGBs) || nextSizeInGBs <= 0) {
+      throw new Error('引导卷容量必须是大于 0 的整数 GB')
+    }
+
+    const currentRes = await this.blockClient.getBootVolume({ bootVolumeId })
+    const currentSizeInGBs = Number(currentRes.bootVolume.sizeInGBs)
+    if (Number.isFinite(currentSizeInGBs) && nextSizeInGBs <= currentSizeInGBs) {
+      throw new Error(`引导卷容量必须大于当前容量 ${currentSizeInGBs} GB`)
+    }
+
+    const res = await this.blockClient.updateBootVolume({
+      bootVolumeId,
+      updateBootVolumeDetails: { sizeInGBs: nextSizeInGBs }
+    })
+
+    return {
+      success: true,
+      requestId: res.opcRequestId,
+      bootVolume: {
+        id: res.bootVolume.id,
+        displayName: res.bootVolume.displayName,
+        sizeInGBs: res.bootVolume.sizeInGBs,
+        state: res.bootVolume.lifecycleState,
+        timeCreated: res.bootVolume.timeCreated
+      }
+    }
   }
 
   async allowAllInboundTraffic(instanceId) {

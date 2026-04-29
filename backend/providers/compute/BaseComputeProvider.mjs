@@ -26,11 +26,14 @@ export default class BaseComputeProvider {
    */
   async instanceAction(instanceId, action) { throw new Error('instanceAction() 未实现') }
 
-  /** 可选：切换公网IP，@returns {Promise<{newIp, oldIp}>} */
-  async switchPublicIp(instanceId) { throw new Error('switchPublicIp() 未支持') }
+  /** 可选：切换 IP，options.ipTypes 可为 ['ipv4'] / ['ipv6'] / ['ipv4', 'ipv6'] */
+  async switchPublicIp(instanceId, options = {}) { throw new Error('switchPublicIp() 未支持') }
 
   /** 可选：添加 IPv6，@returns {Promise<{ipAddress}>} */
   async addIpv6(instanceId) { throw new Error('addIpv6() 未支持') }
+
+  /** 可选：修改引导卷大小 */
+  async resizeBootVolume(bootVolumeId, sizeInGBs) { throw new Error('resizeBootVolume() 未支持') }
 
   /** 可选：获取实例详情 */
   async getInstance(instanceId) { throw new Error('getInstance() 未实现') }

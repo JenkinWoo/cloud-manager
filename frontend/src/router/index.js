@@ -4,6 +4,7 @@ import Dashboard from '../views/Dashboard.vue'
 import Accounts from '../views/Accounts.vue'
 import DnsManager from '../views/DnsManager.vue'
 import TaskQueue from '../views/TaskQueue.vue'
+import SystemLogs from '../views/SystemLogs.vue'
 import Settings from '../views/Settings.vue'
 
 const routes = [
@@ -13,6 +14,7 @@ const routes = [
   { path: '/cloud', component: () => import('../views/CloudInstances.vue'), meta: { title: 'Cloud Instances' } },
   { path: '/dns', component: DnsManager, meta: { title: 'DNS Manager' } },
   { path: '/tasks', component: TaskQueue, meta: { title: 'Task Queue' } },
+  { path: '/logs', component: SystemLogs, meta: { title: 'System Logs' } },
   { path: '/settings', component: Settings, meta: { title: 'Settings' } }
 ]
 

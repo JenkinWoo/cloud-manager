@@ -32,11 +32,19 @@ export const tasksDb = new Low(tasksFile, { tasks: [] })
 await tasksDb.read()
 
 /**
+ * 操作日志
+ */
+const operationLogsFile = new JSONFile(join(dataDir, 'operation_logs.json'))
+export const operationLogsDb = new Low(operationLogsFile, { logs: [] })
+await operationLogsDb.read()
+
+/**
  * 全局设置 (Telegram 等无 Provider 化的配置)
  */
 const settingsFile = new JSONFile(join(dataDir, 'settings.json'))
 export const settingsDb = new Low(settingsFile, {
   telegram: { botToken: '', chatId: '' },
+  operationLogs: { retentionDays: 30 },
   auth: {
     username: 'admin',
     passwordHash: '',

@@ -66,6 +66,28 @@
       </p>
     </div>
 
+    <div class="card section-card">
+      <h3 class="section-title">系统日志</h3>
+      <div class="form-group">
+        <label>日志保留天数</label>
+        <input
+          v-model.number="logForm.retentionDays"
+          class="form-control"
+          type="number"
+          min="1"
+          max="3650"
+          step="1"
+          placeholder="30"
+        />
+      </div>
+      <button class="btn btn-primary" @click="saveLogRule" :disabled="savingLogRule">
+        {{ savingLogRule ? '保存中...' : '保存日志规则' }}
+      </button>
+      <p class="hint-text">
+        默认保留最近 30 天日志；保存后会立即清理超过保留天数的旧日志。
+      </p>
+    </div>
+
     <div class="card">
       <h3 class="section-title">关于</h3>
       <div class="about-list">
@@ -95,7 +117,9 @@ import { authState, logout, setAuthUser } from '../auth.js'
 
 const router = useRouter()
 const tgForm = ref({ botToken: '', chatId: '' })
+const logForm = ref({ retentionDays: 30 })
 const savingTg = ref(false)
+const savingLogRule = ref(false)
 const savingAccount = ref(false)
 const accountForm = ref({
   username: '',
@@ -115,6 +139,7 @@ onMounted(async () => {
     const settings = response.data || {}
     tgForm.value.botToken = settings.telegram?.botToken || ''
     tgForm.value.chatId = settings.telegram?.chatId || ''
+    logForm.value.retentionDays = settings.operationLogs?.retentionDays || 30
   } catch (_) {
   }
 })
@@ -128,6 +153,23 @@ async function saveTg() {
     window.$toast?.(error.response?.data?.error || error.message, 'error')
   } finally {
     savingTg.value = false
+  }
+}
+
+async function saveLogRule() {
+  const retentionDays = Number(logForm.value.retentionDays)
+  if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
+    return window.$toast?.('日志保留天数必须是 1 到 3650 之间的整数', 'error')
+  }
+
+  savingLogRule.value = true
+  try {
+    const response = await settingsApi.updateOperationLogs({ retentionDays })
+    window.$toast?.(`日志规则已保存，已清理 ${response.data.deleted || 0} 条旧日志`, 'success')
+  } catch (error) {
+    window.$toast?.(error.response?.data?.error || error.message, 'error')
+  } finally {
+    savingLogRule.value = false
   }
 }
 
