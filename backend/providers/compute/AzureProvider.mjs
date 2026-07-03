@@ -3,6 +3,7 @@ import BaseComputeProvider from './BaseComputeProvider.mjs'
 import { normalizeAzureCredentials } from '../../utils/azureCredentials.mjs'
 
 let azureSdkPromise = null
+const AZURE_MONITOR_METRICS_API_VERSION = '2018-01-01'
 
 function safeName(input, fallback = 'cloud-manager') {
   const cleaned = String(input || '')
@@ -168,6 +169,15 @@ export default class AzureProvider extends BaseComputeProvider {
       }
     })
     return response.data
+  }
+
+  async _getArmToken() {
+    await this._ensureCredential()
+    const token = await this.credential.getToken('https://management.azure.com/.default')
+    if (!token?.token) {
+      throw new Error('无法获取 Azure 管理 API 访问令牌')
+    }
+    return token.token
   }
 
   async _listSubscriptions() {
@@ -428,6 +438,40 @@ export default class AzureProvider extends BaseComputeProvider {
     return { publicIps, privateIps, ipv6Addresses }
   }
 
+  _sumAzureMetricTotals(metric = {}) {
+    return (metric.timeseries || [])
+      .flatMap((series) => series.data || [])
+      .reduce((sum, point) => sum + Number(point.total || 0), 0)
+  }
+
+  async _getVmNetworkUsage(vmId) {
+    const token = await this._getArmToken()
+    const endTime = new Date()
+    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+    const params = new URLSearchParams({
+      'api-version': AZURE_MONITOR_METRICS_API_VERSION,
+      timespan: `${startTime.toISOString()}/${endTime.toISOString()}`,
+      interval: 'PT1H',
+      aggregation: 'Total',
+      metricnames: 'Network In Total,Network Out Total'
+    })
+
+    const response = await axios.get(`https://management.azure.com${vmId}/providers/Microsoft.Insights/metrics?${params.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    })
+
+    const values = Array.isArray(response.data?.value) ? response.data.value : []
+    const inMetric = values.find((item) => String(item.name?.value || item.name?.localizedValue || '').toLowerCase() === 'network in total')
+    const outMetric = values.find((item) => String(item.name?.value || item.name?.localizedValue || '').toLowerCase() === 'network out total')
+
+    return {
+      networkInBytes24h: inMetric ? this._sumAzureMetricTotals(inMetric) : null,
+      networkOutBytes24h: outMetric ? this._sumAzureMetricTotals(outMetric) : null
+    }
+  }
+
   async listInstances() {
     await this._ensureInitialized()
     const vms = []
@@ -451,11 +495,20 @@ export default class AzureProvider extends BaseComputeProvider {
       } catch (_) {
       }
 
+      let networkUsage = { networkInBytes24h: null, networkOutBytes24h: null }
+      if (networkDetails.publicIps.length > 0) {
+        try {
+          networkUsage = await this._getVmNetworkUsage(vm.id)
+        } catch (_) {
+        }
+      }
+
       return AzureProvider.normalizeInstance(vm, {
         state: mapPowerState(instanceView?.statuses),
         publicIps: networkDetails.publicIps,
         privateIps: networkDetails.privateIps,
-        ipv6Addresses: networkDetails.ipv6Addresses
+        ipv6Addresses: networkDetails.ipv6Addresses,
+        ...networkUsage
       })
     }))
   }
@@ -470,12 +523,20 @@ export default class AzureProvider extends BaseComputeProvider {
     const vm = await this.computeClient.virtualMachines.get(parsed.resourceGroup, parsed.resourceName)
     const instanceView = await this.computeClient.virtualMachines.instanceView(parsed.resourceGroup, parsed.resourceName)
     const networkDetails = await this._collectVmNetworkDetails(vm)
+    let networkUsage = { networkInBytes24h: null, networkOutBytes24h: null }
+    if (networkDetails.publicIps.length > 0) {
+      try {
+        networkUsage = await this._getVmNetworkUsage(vm.id)
+      } catch (_) {
+      }
+    }
 
     return AzureProvider.normalizeInstance(vm, {
       state: mapPowerState(instanceView?.statuses),
       publicIps: networkDetails.publicIps,
       privateIps: networkDetails.privateIps,
-      ipv6Addresses: networkDetails.ipv6Addresses
+      ipv6Addresses: networkDetails.ipv6Addresses,
+      ...networkUsage
     })
   }
 
@@ -812,6 +873,8 @@ export default class AzureProvider extends BaseComputeProvider {
       shape: raw.hardwareProfile?.vmSize,
       cpu: Number(capabilityValue(raw, 'vCPUs')) || null,
       memoryGb: Number(capabilityValue(raw, 'MemoryGB')) || null,
+      networkInBytes24h: Number.isFinite(Number(details.networkInBytes24h)) ? Number(details.networkInBytes24h) : null,
+      networkOutBytes24h: Number.isFinite(Number(details.networkOutBytes24h)) ? Number(details.networkOutBytes24h) : null,
       provider: 'azure',
       timeCreated: raw.timeCreated || raw.properties?.timeCreated || null,
       raw

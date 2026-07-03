@@ -43,7 +43,12 @@ npm run server
 启动前端：
 
 ```bash
-cd frontend
+npm run frontend
+```
+
+同时启动前端和后端（后端支持热更新）：
+
+```bash
 npm run dev
 ```
 

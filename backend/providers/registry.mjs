@@ -13,6 +13,8 @@ import AzureProvider from './compute/AzureProvider.mjs'
 
 import CloudflareProvider from './dns/CloudflareProvider.mjs'
 import AliyunProvider from './dns/AliyunProvider.mjs'
+import TencentCloudProvider from './dns/TencentCloudProvider.mjs'
+import HuaweiCloudProvider from './dns/HuaweiCloudProvider.mjs'
 
 // ============================================================
 // 注册表（在此处添加新 Provider）
@@ -28,7 +30,8 @@ const computeProviders = {
 const dnsProviders = {
   cloudflare: CloudflareProvider,
   aliyun:     AliyunProvider,
-  // tencent: TencentDnsProvider,
+  tencentcloud: TencentCloudProvider,
+  huaweicloud: HuaweiCloudProvider,
 }
 
 // ============================================================

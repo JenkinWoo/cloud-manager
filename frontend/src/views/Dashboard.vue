@@ -12,9 +12,9 @@
 
     <div class="stats-grid">
       <div class="card stat-card">
-        <div class="stat-icon">AC</div>
-        <div class="stat-value">{{ accounts.length }}</div>
-        <div class="stat-label">总账户数</div>
+        <div class="stat-icon">AC / ON</div>
+        <div class="stat-value">{{ accounts.length }} / {{ enabledAccounts.length }}</div>
+        <div class="stat-label">总账户数 / 启用中的计算账户</div>
       </div>
       <div class="card stat-card">
         <div class="stat-icon">OCI</div>
@@ -40,11 +40,6 @@
         <div class="stat-icon" style="color:var(--yellow)">RUN</div>
         <div class="stat-value" style="color:var(--yellow)">{{ pendingTasks }}</div>
         <div class="stat-label">运行中任务</div>
-      </div>
-      <div class="card stat-card">
-        <div class="stat-icon" style="color:var(--text-secondary)">ON</div>
-        <div class="stat-value" style="color:var(--text-secondary)">{{ enabledAccounts.length }}</div>
-        <div class="stat-label">启用中的计算账户</div>
       </div>
     </div>
 

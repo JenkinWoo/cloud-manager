@@ -68,6 +68,8 @@ export default class BaseComputeProvider {
  * @property {string} shape
  * @property {number} cpu
  * @property {number} memoryGb
+ * @property {number | null} networkInBytes24h
+ * @property {number | null} networkOutBytes24h
  * @property {string} provider
  * @property {string} timeCreated
  * @property {object} raw

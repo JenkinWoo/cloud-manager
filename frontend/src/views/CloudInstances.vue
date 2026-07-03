@@ -114,6 +114,14 @@
                 </div>
                 <span v-else class="info-value">-</span>
               </div>
+              <div class="info-row">
+                <span class="info-label">近24h 入量</span>
+                <span class="info-value">{{ formatNetworkUsage(instance, 'networkInBytes24h') }}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">近24h 出量</span>
+                <span class="info-value">{{ formatNetworkUsage(instance, 'networkOutBytes24h') }}</span>
+              </div>
             </div>
 
             <div class="divider"></div>
@@ -1142,6 +1150,29 @@ function formatConfig(instance) {
   if (instance.cpu) parts.push(`${instance.cpu} vCPU`)
   if (instance.memoryGb) parts.push(`${instance.memoryGb} GB`)
   return parts.join(' / ')
+}
+
+function formatNetworkUsage(instance, field) {
+  if (!instance?.publicIps?.length) return '-'
+  return formatBytes(instance?.[field])
+}
+
+function formatBytes(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num) || num < 0) return '监控不可用'
+  if (num === 0) return '0 B'
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  let size = num
+  let unitIndex = 0
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+
+  const digits = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2
+  return `${size.toFixed(digits)} ${units[unitIndex]}`
 }
 
 function shortText(text, length = 18) {

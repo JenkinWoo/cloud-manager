@@ -12,7 +12,7 @@
       <select v-else v-model="selectedDnsAccountId" class="form-control" style="max-width: 320px">
         <option value="" disabled>-- 请选择 DNS 账户 --</option>
         <option v-for="a in dnsAccounts" :key="a.id" :value="a.id">
-          {{ a.name }} ({{ a.dnsProvider }})
+          {{ a.name }} ({{ dnsProviderLabel(a.dnsProvider) }})
         </option>
       </select>
     </div>
@@ -133,10 +133,11 @@
                 </span>
               </td>
               <td>
-                <div class="action-row">
+                <div v-if="canManageRecord(record)" class="action-row">
                   <button class="btn btn-ghost btn-sm" @click="editRecord(record)">编辑</button>
                   <button class="btn btn-danger btn-sm" @click="deleteFromRow(record)">删除</button>
                 </div>
+                <span v-else class="record-note">系统记录</span>
               </td>
             </tr>
           </tbody>
@@ -155,6 +156,15 @@ const selectedDnsAccountId = ref('')
 const loadingAccounts = ref(true)
 const loadingRecords = ref(false)
 const records = ref([])
+const MANAGEABLE_RECORD_TYPES = new Set(['A', 'AAAA', 'CNAME', 'TXT'])
+let recordsRequestId = 0
+
+const DNS_PROVIDER_LABELS = {
+  cloudflare: 'Cloudflare',
+  aliyun: 'Aliyun DNS',
+  tencentcloud: 'Tencent Cloud DNSPod',
+  huaweicloud: 'Huawei Cloud DNS'
+}
 
 const saving = ref(false)
 const deleting = ref(false)
@@ -241,24 +251,35 @@ onMounted(async () => {
 watch(selectedDnsAccountId, async (value) => {
   resetEditor()
   delForm.value = { recordName: '', recordType: 'A' }
+  records.value = []
   if (!value) {
-    records.value = []
+    recordsRequestId += 1
+    loadingRecords.value = false
     return
   }
-  await loadRecords()
+  await loadRecords(value)
 })
 
-async function loadRecords() {
-  if (!selectedDnsAccountId.value) return
+async function loadRecords(accountId = selectedDnsAccountId.value) {
+  if (!accountId) return
 
+  const requestId = ++recordsRequestId
   loadingRecords.value = true
   try {
-    const res = await dnsApi.listRecords(selectedDnsAccountId.value)
+    const res = await dnsApi.listRecords(accountId)
+    if (requestId !== recordsRequestId || accountId !== selectedDnsAccountId.value) {
+      return
+    }
     records.value = res.data
   } catch (e) {
+    if (requestId !== recordsRequestId || accountId !== selectedDnsAccountId.value) {
+      return
+    }
     window.$toast?.(e.response?.data?.error || e.message, 'error')
   } finally {
-    loadingRecords.value = false
+    if (requestId === recordsRequestId) {
+      loadingRecords.value = false
+    }
   }
 }
 
@@ -268,6 +289,11 @@ function resetEditor() {
 }
 
 function editRecord(record) {
+  if (!canManageRecord(record)) {
+    window.$toast?.(`${record.type} 系统记录不支持在此处编辑`, 'error')
+    return
+  }
+
   editingRecord.value = record
   quickForm.value = {
     recordName: toShortRecordName(record.name),
@@ -355,7 +381,19 @@ async function deleteRecord() {
 }
 
 async function deleteFromRow(record) {
+  if (!canManageRecord(record)) {
+    window.$toast?.(`${record.type} 系统记录不支持在此处删除`, 'error')
+    return
+  }
   await removeRecord(record.name, record.type)
+}
+
+function dnsProviderLabel(provider) {
+  return DNS_PROVIDER_LABELS[provider] || String(provider || '-').toUpperCase()
+}
+
+function canManageRecord(record) {
+  return MANAGEABLE_RECORD_TYPES.has(String(record?.type || '').toUpperCase())
 }
 </script>
 
@@ -478,6 +516,11 @@ async function deleteFromRow(record) {
   display: flex;
   justify-content: center;
   padding: 20px 0;
+}
+
+.record-note {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .record-content {

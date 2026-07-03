@@ -1,6 +1,6 @@
 {
   "name": "cloud-manager",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "统一管理 Oracle、AWS、DNS 与任务队列的云资源管理平台。",
   "author": "JenkinWoo",
   "license": "ISC",
@@ -10,7 +10,9 @@
   "scripts": {
     "start": "node backend/server.mjs",
     "server": "node backend/server.mjs",
-    "frontend": "cd frontend && npm run dev"
+    "server:dev": "node --watch --watch-preserve-output backend/server.mjs",
+    "frontend": "npm --prefix frontend run dev",
+    "dev": "node scripts/dev.mjs"
   },
   "keywords": [
     "oracle",

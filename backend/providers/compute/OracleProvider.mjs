@@ -39,6 +39,7 @@ export default class OracleProvider extends BaseComputeProvider {
     this.networkClient = null
     this.blockClient = null
     this.identityClient = null
+    this.monitoringClient = null
     this._initPromise = null
     this._availabilityDomains = []
   }
@@ -51,7 +52,7 @@ export default class OracleProvider extends BaseComputeProvider {
 
     this._initPromise = (async () => {
       const sdk = await loadOciSdk()
-      const { SimpleAuthenticationDetailsProvider, common, core, identity } = sdk
+      const { SimpleAuthenticationDetailsProvider, common, core, identity, monitoring } = sdk
 
       const config = this._parseOciConfig(this.configText, this.profile)
       const privateKeyText = this._resolvePrivateKeyText(this.rawPrivateKeyText)
@@ -71,6 +72,7 @@ export default class OracleProvider extends BaseComputeProvider {
       this.networkClient = new core.VirtualNetworkClient({ authenticationDetailsProvider: this.provider })
       this.blockClient = new core.BlockstorageClient({ authenticationDetailsProvider: this.provider })
       this.identityClient = new identity.IdentityClient({ authenticationDetailsProvider: this.provider })
+      this.monitoringClient = new monitoring.MonitoringClient({ authenticationDetailsProvider: this.provider })
     })()
 
     try {
@@ -183,7 +185,16 @@ export default class OracleProvider extends BaseComputeProvider {
         ips = await this._getInstancePublicIps(ins.id)
       } catch (_) {
       }
-      return OracleProvider.normalizeInstance(ins, ips)
+
+      let networkUsage = { networkInBytes24h: null, networkOutBytes24h: null }
+      if (ips.publicIps.length > 0) {
+        try {
+          networkUsage = await this._getRecentNetworkUsage(ins.id)
+        } catch (_) {
+        }
+      }
+
+      return OracleProvider.normalizeInstance(ins, { ...ips, ...networkUsage })
     }))
   }
 
@@ -195,7 +206,71 @@ export default class OracleProvider extends BaseComputeProvider {
       ips = await this._getInstancePublicIps(instanceId)
     } catch (_) {
     }
-    return OracleProvider.normalizeInstance(res.instance, ips)
+
+    let networkUsage = { networkInBytes24h: null, networkOutBytes24h: null }
+    if (ips.publicIps.length > 0) {
+      try {
+        networkUsage = await this._getRecentNetworkUsage(instanceId)
+      } catch (_) {
+      }
+    }
+
+    return OracleProvider.normalizeInstance(res.instance, { ...ips, ...networkUsage })
+  }
+
+  _sumCumulativeDatapoints(items = []) {
+    const datapoints = items
+      .flatMap((item) => item.aggregatedDatapoints || [])
+      .map((point) => ({
+        timestamp: new Date(point.timestamp).getTime(),
+        value: Number(point.value)
+      }))
+      .filter((point) => Number.isFinite(point.timestamp) && Number.isFinite(point.value))
+      .sort((left, right) => left.timestamp - right.timestamp)
+
+    if (!datapoints.length) return null
+    if (datapoints.length === 1) return Math.max(datapoints[0].value, 0)
+
+    let total = 0
+    let previousValue = datapoints[0].value
+
+    for (let index = 1; index < datapoints.length; index += 1) {
+      const currentValue = datapoints[index].value
+      total += currentValue >= previousValue ? currentValue - previousValue : Math.max(currentValue, 0)
+      previousValue = currentValue
+    }
+
+    return total
+  }
+
+  async _queryRecentNetworkMetric(instanceId, metricName) {
+    const endTime = new Date()
+    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+
+    const response = await this.monitoringClient.summarizeMetricsData({
+      compartmentId: this.compartmentId,
+      summarizeMetricsDataDetails: {
+        namespace: 'oci_computeagent',
+        query: `${metricName}[5m]{resourceId = \"${instanceId}\"}.max()`,
+        startTime,
+        endTime,
+        resolution: '5m'
+      }
+    })
+
+    return this._sumCumulativeDatapoints(response.items || [])
+  }
+
+  async _getRecentNetworkUsage(instanceId) {
+    const [networkInBytes24h, networkOutBytes24h] = await Promise.all([
+      this._queryRecentNetworkMetric(instanceId, 'NetworksBytesIn'),
+      this._queryRecentNetworkMetric(instanceId, 'NetworksBytesOut')
+    ])
+
+    return {
+      networkInBytes24h: Number.isFinite(Number(networkInBytes24h)) ? Number(networkInBytes24h) : null,
+      networkOutBytes24h: Number.isFinite(Number(networkOutBytes24h)) ? Number(networkOutBytes24h) : null
+    }
   }
 
   async createInstance(params) {
@@ -570,19 +645,21 @@ export default class OracleProvider extends BaseComputeProvider {
     return { subnetId: subnetRes.subnet.id, vcnId }
   }
 
-  static normalizeInstance(raw, ips = {}) {
+  static normalizeInstance(raw, details = {}) {
     return {
       id: raw.id,
       displayName: raw.displayName,
       state: raw.lifecycleState,
-      publicIps: ips.publicIps || [],
-      privateIps: ips.privateIps || [],
-      ipv6Addresses: ips.ipv6s || [],
+      publicIps: details.publicIps || [],
+      privateIps: details.privateIps || [],
+      ipv6Addresses: details.ipv6s || [],
       region: raw.region,
       zone: raw.availabilityDomain,
       shape: raw.shape,
       cpu: raw.shapeConfig?.ocpus,
       memoryGb: raw.shapeConfig?.memoryInGBs,
+      networkInBytes24h: Number.isFinite(Number(details.networkInBytes24h)) ? Number(details.networkInBytes24h) : null,
+      networkOutBytes24h: Number.isFinite(Number(details.networkOutBytes24h)) ? Number(details.networkOutBytes24h) : null,
       provider: 'oracle',
       timeCreated: raw.timeCreated,
       raw

@@ -68,7 +68,7 @@
         <tbody>
           <tr v-for="account in dnsAccounts" :key="account.id">
             <td><span class="account-name">{{ account.name }}</span></td>
-            <td><span class="badge badge-running">{{ account.dnsProvider?.toUpperCase() }}</span></td>
+            <td><span class="badge badge-running">{{ dnsProviderLabel(account.dnsProvider) }}</span></td>
             <td class="summary-cell">{{ dnsCredentialSummary(account) }}</td>
             <td><span :class="['badge', account.enabled ? 'badge-running' : 'badge-stopped']">{{ account.enabled ? '启用' : '禁用' }}</span></td>
             <td>
@@ -183,7 +183,7 @@
           <label>DNS Provider *</label>
           <select v-model="dnsForm.dnsProvider" class="form-control" :disabled="!!editDnsTarget">
             <option v-for="provider in dnsProviders" :key="provider.key" :value="provider.key">
-              {{ provider.key.toUpperCase() }}
+              {{ dnsProviderLabel(provider.key) }}
             </option>
           </select>
         </div>
@@ -218,6 +218,36 @@
           </div>
         </template>
 
+        <template v-else-if="dnsForm.dnsProvider === 'tencentcloud'">
+          <div class="form-group">
+            <label>SecretId *</label>
+            <input v-model="dnsCred.secretId" class="form-control" />
+          </div>
+          <div class="form-group">
+            <label>SecretKey *</label>
+            <input v-model="dnsCred.secretKey" class="form-control" type="password" />
+          </div>
+          <div class="form-group">
+            <label>根域名 *</label>
+            <input v-model="dnsCred.domainName" class="form-control" placeholder="example.com" />
+          </div>
+        </template>
+
+        <template v-else-if="dnsForm.dnsProvider === 'huaweicloud'">
+          <div class="form-group">
+            <label>Access Key ID (AK) *</label>
+            <input v-model="dnsCred.accessKeyId" class="form-control" />
+          </div>
+          <div class="form-group">
+            <label>Secret Access Key (SK) *</label>
+            <input v-model="dnsCred.secretAccessKey" class="form-control" type="password" />
+          </div>
+          <div class="form-group">
+            <label>根域名 *</label>
+            <input v-model="dnsCred.domainName" class="form-control" placeholder="example.com" />
+          </div>
+        </template>
+
         <div class="modal-footer">
           <button class="btn btn-ghost" @click="showDnsModal = false">取消</button>
           <button class="btn btn-primary" @click="saveDns" :disabled="savingDns">
@@ -246,6 +276,13 @@ const editTarget = ref(null)
 const editDnsTarget = ref(null)
 const testingId = ref(null)
 const testingDnsId = ref(null)
+
+const DNS_PROVIDER_LABELS = {
+  cloudflare: 'Cloudflare',
+  aliyun: 'Aliyun DNS',
+  tencentcloud: 'Tencent Cloud DNSPod',
+  huaweicloud: 'Huawei Cloud DNS'
+}
 
 const defForm = () => ({ name: '', computeProvider: 'oracle' })
 const defDnsForm = () => ({ name: '', dnsProvider: 'cloudflare' })
@@ -359,22 +396,9 @@ async function saveDns() {
     return window.$toast?.('请填写账户名', 'error')
   }
 
-  if (dnsForm.value.dnsProvider === 'cloudflare') {
-    if (!dnsCred.value.apiToken || !dnsCred.value.zoneId) {
-      return window.$toast?.('Please fill API Token and Zone ID', 'error')
-    }
-    if (!dnsCred.value.domainName) {
-      return window.$toast?.('Please fill the root domain, for example example.com', 'error')
-    }
-  }
-
-  if (dnsForm.value.dnsProvider === 'aliyun') {
-    if (!dnsCred.value.accessKeyId || !dnsCred.value.accessKeySecret) {
-      return window.$toast?.('Please fill Access Key ID and Access Key Secret', 'error')
-    }
-    if (!dnsCred.value.domainName) {
-      return window.$toast?.('Please fill the root domain, for example frp.gs', 'error')
-    }
+  const dnsValidationError = validateDnsCredentials(dnsForm.value.dnsProvider, dnsCred.value)
+  if (dnsValidationError) {
+    return window.$toast?.(dnsValidationError, 'error')
   }
 
   savingDns.value = true
@@ -469,7 +493,61 @@ function dnsCredentialSummary(account) {
   if (account.dnsProvider === 'aliyun') {
     return `${maskKey(account.credentials?.accessKeyId)} · ${account.credentials?.domainName || '-'}`
   }
+  if (account.dnsProvider === 'tencentcloud') {
+    return `${maskKey(account.credentials?.secretId)} · ${account.credentials?.domainName || '-'}`
+  }
+  if (account.dnsProvider === 'huaweicloud') {
+    return `${maskKey(account.credentials?.accessKeyId)} · ${account.credentials?.domainName || '-'}`
+  }
   return '-'
+}
+
+function validateDnsCredentials(provider, credentials) {
+  if (provider === 'cloudflare') {
+    if (!credentials.apiToken || !credentials.zoneId) {
+      return '请填写 API Token 和 Zone ID'
+    }
+    if (!credentials.domainName) {
+      return '请填写根域名，例如 example.com'
+    }
+    return ''
+  }
+
+  if (provider === 'aliyun') {
+    if (!credentials.accessKeyId || !credentials.accessKeySecret) {
+      return '请填写 Access Key ID 和 Access Key Secret'
+    }
+    if (!credentials.domainName) {
+      return '请填写根域名，例如 frp.gs'
+    }
+    return ''
+  }
+
+  if (provider === 'tencentcloud') {
+    if (!credentials.secretId || !credentials.secretKey) {
+      return '请填写 SecretId 和 SecretKey'
+    }
+    if (!credentials.domainName) {
+      return '请填写根域名，例如 example.com'
+    }
+    return ''
+  }
+
+  if (provider === 'huaweicloud') {
+    if (!credentials.accessKeyId || !credentials.secretAccessKey) {
+      return '请填写 Access Key ID (AK) 和 Secret Access Key (SK)'
+    }
+    if (!credentials.domainName) {
+      return '请填写根域名，例如 example.com'
+    }
+    return ''
+  }
+
+  return ''
+}
+
+function dnsProviderLabel(provider) {
+  return DNS_PROVIDER_LABELS[provider] || String(provider || '-').toUpperCase()
 }
 
 function fmtDate(value) {

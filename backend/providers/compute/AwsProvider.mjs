@@ -18,6 +18,15 @@ import {
 } from '@aws-sdk/client-ec2'
 import BaseComputeProvider from './BaseComputeProvider.mjs'
 
+let awsSdkPromise = null
+
+async function loadAwsSdk() {
+  if (!awsSdkPromise) {
+    awsSdkPromise = import('aws-sdk').then((mod) => mod.default || mod)
+  }
+  return awsSdkPromise
+}
+
 export default class AwsProvider extends BaseComputeProvider {
   static providerName = 'aws'
   static capabilities = ['elastic_ip', 'switch_ip', 'switch_ipv6', 'security_groups', 'allow_all_inbound_traffic']
@@ -29,21 +38,26 @@ export default class AwsProvider extends BaseComputeProvider {
       region,
       credentials: { accessKeyId, secretAccessKey }
     })
+    this.cloudWatchCredentials = { accessKeyId, secretAccessKey }
+    this.cloudWatch = null
+    this._cloudWatchPromise = null
     this.region = region
   }
 
   async listInstances() {
     const data = await this.client.send(new DescribeInstancesCommand({}))
-    return data.Reservations.flatMap(r =>
+    const instances = data.Reservations.flatMap(r =>
       r.Instances.map(i => AwsProvider.normalizeInstance(i, this.region))
     )
+    return this._attachNetworkUsage(instances)
   }
 
   async getInstance(instanceId) {
     const data = await this.client.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }))
     const ins = data.Reservations?.[0]?.Instances?.[0]
     if (!ins) throw new Error('实例不存在: ' + instanceId)
-    return AwsProvider.normalizeInstance(ins, this.region)
+    const [instance] = await this._attachNetworkUsage([AwsProvider.normalizeInstance(ins, this.region)])
+    return instance
   }
 
   async createInstance(params) {
@@ -237,6 +251,130 @@ export default class AwsProvider extends BaseComputeProvider {
     return { success: true }
   }
 
+  async _getCloudWatch() {
+    if (this.cloudWatch) return this.cloudWatch
+    if (this._cloudWatchPromise) return this._cloudWatchPromise
+
+    this._cloudWatchPromise = loadAwsSdk().then((awsSdk) => {
+      this.cloudWatch = new awsSdk.CloudWatch({
+        region: this.region,
+        credentials: this.cloudWatchCredentials
+      })
+      return this.cloudWatch
+    })
+
+    return this._cloudWatchPromise
+  }
+
+  async _getNetworkUsageMap(instanceIds = []) {
+    if (!instanceIds.length) return new Map()
+
+    const cloudWatch = await this._getCloudWatch()
+    const endTime = new Date()
+    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+    const chunkSize = 100
+    const usageMap = new Map()
+
+    for (let index = 0; index < instanceIds.length; index += chunkSize) {
+      const chunk = instanceIds.slice(index, index + chunkSize)
+      const metricDataQueries = []
+      const queryMeta = new Map()
+
+      chunk.forEach((instanceId, chunkIndex) => {
+        const inId = `m${index + chunkIndex}in`
+        const outId = `m${index + chunkIndex}out`
+
+        queryMeta.set(inId, { instanceId, field: 'networkInBytes24h' })
+        queryMeta.set(outId, { instanceId, field: 'networkOutBytes24h' })
+
+        metricDataQueries.push(
+          {
+            Id: inId,
+            MetricStat: {
+              Metric: {
+                Namespace: 'AWS/EC2',
+                MetricName: 'NetworkIn',
+                Dimensions: [{ Name: 'InstanceId', Value: instanceId }]
+              },
+              Period: 3600,
+              Stat: 'Sum',
+              Unit: 'Bytes'
+            },
+            ReturnData: true
+          },
+          {
+            Id: outId,
+            MetricStat: {
+              Metric: {
+                Namespace: 'AWS/EC2',
+                MetricName: 'NetworkOut',
+                Dimensions: [{ Name: 'InstanceId', Value: instanceId }]
+              },
+              Period: 3600,
+              Stat: 'Sum',
+              Unit: 'Bytes'
+            },
+            ReturnData: true
+          }
+        )
+      })
+
+      let nextToken = undefined
+      do {
+        const response = await cloudWatch.getMetricData({
+          StartTime: startTime,
+          EndTime: endTime,
+          MetricDataQueries: metricDataQueries,
+          ScanBy: 'TimestampAscending',
+          NextToken: nextToken
+        }).promise()
+
+        for (const item of response.MetricDataResults || []) {
+          const meta = queryMeta.get(item.Id)
+          if (!meta) continue
+
+          const total = (item.Values || []).reduce((sum, value) => sum + Number(value || 0), 0)
+          const current = usageMap.get(meta.instanceId) || { networkInBytes24h: null, networkOutBytes24h: null }
+          current[meta.field] = total
+          usageMap.set(meta.instanceId, current)
+        }
+
+        nextToken = response.NextToken
+      } while (nextToken)
+    }
+
+    return usageMap
+  }
+
+  async _attachNetworkUsage(instances = []) {
+    const publicInstanceIds = instances
+      .filter((instance) => Array.isArray(instance.publicIps) && instance.publicIps.length > 0)
+      .map((instance) => instance.id)
+
+    if (!publicInstanceIds.length) {
+      return instances.map((instance) => ({
+        ...instance,
+        networkInBytes24h: null,
+        networkOutBytes24h: null
+      }))
+    }
+
+    let usageMap = new Map()
+    try {
+      usageMap = await this._getNetworkUsageMap(publicInstanceIds)
+    } catch (_) {
+    }
+
+    return instances.map((instance) => {
+      const usage = usageMap.get(instance.id) || {}
+      return {
+        ...instance,
+        networkInBytes24h: Number.isFinite(Number(usage.networkInBytes24h)) ? Number(usage.networkInBytes24h) : null,
+        networkOutBytes24h: Number.isFinite(Number(usage.networkOutBytes24h)) ? Number(usage.networkOutBytes24h) : null
+      }
+    })
+  }
+
   static normalizeInstance(raw, region) {
     const publicIps = new Set()
     const privateIps = new Set()
@@ -269,6 +407,8 @@ export default class AwsProvider extends BaseComputeProvider {
       shape: raw.InstanceType,
       cpu: null,
       memoryGb: null,
+      networkInBytes24h: null,
+      networkOutBytes24h: null,
       provider: 'aws',
       timeCreated: raw.LaunchTime,
       tags: (raw.Tags || []).reduce((acc, t) => { acc[t.Key] = t.Value; return acc }, {}),
