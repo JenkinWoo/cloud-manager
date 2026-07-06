@@ -91,11 +91,7 @@
     <div class="card">
       <h3 class="section-title">关于</h3>
       <div class="about-list">
-        <div>版本: <span class="about-value">1.1.0</span></div>
-        <div>
-          后端:
-          <a :href="backendHealthUrl" target="_blank" rel="noreferrer" class="about-link">{{ backendBaseUrl }}</a>
-        </div>
+        <div>版本: <span class="about-value">{{ appVersion }}</span></div>
         <div>
           GitHub:
           <a href="https://github.com/JenkinWoo/cloud-manager" target="_blank" rel="noreferrer" class="about-link">
@@ -128,8 +124,7 @@ const accountForm = ref({
   currentPassword: ''
 })
 
-const backendBaseUrl = computed(() => window.location.origin)
-const backendHealthUrl = computed(() => `${backendBaseUrl.value}/api/health`)
+const appVersion = __APP_VERSION__
 
 onMounted(async () => {
   accountForm.value.username = authState.user?.username || ''

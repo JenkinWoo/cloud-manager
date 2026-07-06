@@ -26,6 +26,20 @@ backend/    后端服务与数据
 frontend/   前端项目
 ```
 
+## API Key 获取指南
+
+添加云账号或 DNS 账号前，可以先参考以下文档获取对应平台的访问凭证：
+
+- [Oracle API Key 获取教程](docs/oracle-api-key-guide.md)
+- [AWS API Key 获取教程](docs/aws-api-key-guide.md)
+- [Azure API Key 获取教程](docs/azure-api-key-guide.md)
+- [Cloudflare DNS API Token 获取教程](docs/dns-cloudflare-guide.md)
+- [Aliyun DNS AccessKey 获取教程](docs/dns-aliyun-guide.md)
+- [Tencent Cloud DNSPod SecretId / SecretKey 获取教程](docs/dns-tencentcloud-guide.md)
+- [Huawei Cloud DNS AK / SK 获取教程](docs/dns-huaweicloud-guide.md)
+
+建议为本项目单独创建权限最小化的用户或 Token，不要使用主账号、Root 账号或全局 API Key；密钥只会在创建时完整显示一次，请妥善保存并避免提交到 Git。
+
 ## 本地开发
 
 安装依赖：
