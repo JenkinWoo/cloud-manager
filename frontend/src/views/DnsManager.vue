@@ -241,7 +241,7 @@ function selectDnsAccount(id) {
 onMounted(async () => {
   try {
     const res = await accountsApi.listDns()
-    dnsAccounts.value = res.data
+    dnsAccounts.value = (res.data || []).filter((item) => item.enabled !== false)
     if (dnsAccounts.value.length > 0) {
       selectedDnsAccountId.value = dnsAccounts.value[0].id
     }

@@ -266,12 +266,13 @@ export default class AwsProvider extends BaseComputeProvider {
     return this._cloudWatchPromise
   }
 
-  async _getNetworkUsageMap(instanceIds = []) {
+  async _getNetworkUsageMap(instanceIds = [], options = {}) {
     if (!instanceIds.length) return new Map()
 
     const cloudWatch = await this._getCloudWatch()
-    const endTime = new Date()
-    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+    const endTime = options.endTime ? new Date(options.endTime) : new Date()
+    const startTime = options.startTime ? new Date(options.startTime) : new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+    const period = Number(options.period || 3600)
     const chunkSize = 100
     const usageMap = new Map()
 
@@ -296,7 +297,7 @@ export default class AwsProvider extends BaseComputeProvider {
                 MetricName: 'NetworkIn',
                 Dimensions: [{ Name: 'InstanceId', Value: instanceId }]
               },
-              Period: 3600,
+              Period: period,
               Stat: 'Sum',
               Unit: 'Bytes'
             },
@@ -310,7 +311,7 @@ export default class AwsProvider extends BaseComputeProvider {
                 MetricName: 'NetworkOut',
                 Dimensions: [{ Name: 'InstanceId', Value: instanceId }]
               },
-              Period: 3600,
+              Period: period,
               Stat: 'Sum',
               Unit: 'Bytes'
             },
@@ -344,6 +345,22 @@ export default class AwsProvider extends BaseComputeProvider {
     }
 
     return usageMap
+  }
+
+  async getNetworkUsage(instanceIds = [], options = {}) {
+    const usageMap = await this._getNetworkUsageMap(instanceIds, {
+      startTime: options.startTime,
+      endTime: options.endTime,
+      period: options.period || 3600
+    })
+
+    return new Map(Array.from(usageMap.entries()).map(([instanceId, usage]) => ([
+      instanceId,
+      {
+        inBytes: usage.networkInBytes24h,
+        outBytes: usage.networkOutBytes24h
+      }
+    ])))
   }
 
   async _attachNetworkUsage(instances = []) {

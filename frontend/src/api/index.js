@@ -48,16 +48,19 @@ function logTargetConfig(logTarget, config = {}) {
 }
 
 export const accountsApi = {
-  list: () => api.get('/accounts'),
+  list: (params = {}) => api.get('/accounts', { params }),
   create: (data) => api.post('/accounts', data),
   update: (id, data) => api.put(`/accounts/${id}`, data),
   delete: (id) => api.delete(`/accounts/${id}`),
   test: (id) => api.post(`/accounts/${id}/test`),
-  listDns: () => api.get('/accounts/dns'),
+  oracleAccountType: (id, params = {}) => api.get(`/accounts/${id}/oracle-account-type`, { params }),
+  reorder: (ids) => api.put('/accounts/reorder', { ids }),
+  listDns: (params = {}) => api.get('/accounts/dns', { params }),
   createDns: (data) => api.post('/accounts/dns', data),
   updateDns: (id, data) => api.put(`/accounts/dns/${id}`, data),
   deleteDns: (id) => api.delete(`/accounts/dns/${id}`),
-  testDns: (id) => api.post(`/accounts/dns/${id}/test`)
+  testDns: (id) => api.post(`/accounts/dns/${id}/test`),
+  reorderDns: (ids) => api.put('/accounts/dns/reorder', { ids })
 }
 
 export const cloudApi = {
@@ -77,6 +80,7 @@ export const cloudApi = {
   listElasticIps: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/elastic-ips`, { ...config, params }),
   releaseUnused: (accountId, data = {}) => api.post(`/cloud/${accountId}/elastic-ips/release-unused`, data),
   capabilities: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/capabilities`, { ...config, params }),
+  trafficUsage: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/traffic-usage`, { ...config, params }),
   modifyShape: (accountId, instanceId, data, logTarget) =>
     api.put(`/cloud/${accountId}/instances/${instanceId}/shape`, data, logTargetConfig(logTarget)),
   allowAllFirewall: (accountId, instanceId, data = {}, logTarget) =>

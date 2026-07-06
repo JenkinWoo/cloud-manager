@@ -20,6 +20,7 @@
       <table>
         <thead>
           <tr>
+            <th>排序</th>
             <th>账户名</th>
             <th>Provider</th>
             <th>凭证摘要</th>
@@ -29,11 +30,46 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="account in accounts" :key="account.id">
+          <tr v-for="(account, index) in accounts" :key="account.id">
+            <td>
+              <div class="sort-actions">
+                <button
+                  class="btn btn-ghost btn-sm sort-button"
+                  :disabled="index === 0 || sortingId === account.id"
+                  aria-label="Move up"
+                  title="Move up"
+                  @click="moveAccount(index, -1)"
+                >
+                  ⬆️
+                </button>
+                <button
+                  class="btn btn-ghost btn-sm sort-button"
+                  :disabled="index === accounts.length - 1 || sortingId === account.id"
+                  aria-label="Move down"
+                  title="Move down"
+                  @click="moveAccount(index, 1)"
+                >
+                  ⬇️
+                </button>
+              </div>
+            </td>
             <td><span class="account-name">{{ account.name }}</span></td>
-            <td><span :class="['badge', providerBadge(account.computeProvider)]">{{ account.computeProvider?.toUpperCase() }}</span></td>
+            <td>
+              <span :class="['badge', providerBadge(account.computeProvider)]" :title="providerTitle(account)">
+                {{ providerLabel(account) }}
+              </span>
+            </td>
             <td class="summary-cell">{{ computeCredentialSummary(account) }}</td>
-            <td><span :class="['badge', account.enabled ? 'badge-running' : 'badge-stopped']">{{ account.enabled ? '启用' : '禁用' }}</span></td>
+            <td>
+              <button
+                :class="['badge', 'status-toggle', isEnabled(account) ? 'badge-running' : 'badge-stopped']"
+                :disabled="togglingId === account.id"
+                :title="isEnabled(account) ? '点击停用账户' : '点击启用账户'"
+                @click="toggleAccount(account)"
+              >
+                {{ isEnabled(account) ? '启用' : '禁用' }}
+              </button>
+            </td>
             <td class="summary-cell">{{ fmtDate(account.createdAt) }}</td>
             <td>
               <div class="action-row">
@@ -58,6 +94,7 @@
       <table>
         <thead>
           <tr>
+            <th>排序</th>
             <th>账户名</th>
             <th>Provider</th>
             <th>凭证摘要</th>
@@ -66,11 +103,42 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="account in dnsAccounts" :key="account.id">
+          <tr v-for="(account, index) in dnsAccounts" :key="account.id">
+            <td>
+              <div class="sort-actions">
+                <button
+                  class="btn btn-ghost btn-sm sort-button"
+                  :disabled="index === 0 || sortingDnsId === account.id"
+                  aria-label="Move up"
+                  title="Move up"
+                  @click="moveDnsAccount(index, -1)"
+                >
+                  ⬆️
+                </button>
+                <button
+                  class="btn btn-ghost btn-sm sort-button"
+                  :disabled="index === dnsAccounts.length - 1 || sortingDnsId === account.id"
+                  aria-label="Move down"
+                  title="Move down"
+                  @click="moveDnsAccount(index, 1)"
+                >
+                  ⬇️
+                </button>
+              </div>
+            </td>
             <td><span class="account-name">{{ account.name }}</span></td>
             <td><span class="badge badge-running">{{ dnsProviderLabel(account.dnsProvider) }}</span></td>
             <td class="summary-cell">{{ dnsCredentialSummary(account) }}</td>
-            <td><span :class="['badge', account.enabled ? 'badge-running' : 'badge-stopped']">{{ account.enabled ? '启用' : '禁用' }}</span></td>
+            <td>
+              <button
+                :class="['badge', 'status-toggle', isEnabled(account) ? 'badge-running' : 'badge-stopped']"
+                :disabled="togglingDnsId === account.id"
+                :title="isEnabled(account) ? '点击停用 DNS 账户' : '点击启用 DNS 账户'"
+                @click="toggleDnsAccount(account)"
+              >
+                {{ isEnabled(account) ? '启用' : '禁用' }}
+              </button>
+            </td>
             <td>
               <div class="action-row">
                 <button class="btn btn-ghost btn-sm" @click="testDns(account)" :disabled="testingDnsId === account.id">
@@ -107,6 +175,14 @@
         </div>
 
         <template v-if="form.computeProvider === 'oracle'">
+          <div class="form-group">
+            <label>账户类型</label>
+            <select v-model="form.oracleAccountTypeMode" class="form-control">
+              <option value="auto">自动检测</option>
+              <option value="free">免费账户</option>
+              <option value="upgraded">升级账户</option>
+            </select>
+          </div>
           <div class="form-group">
             <label>OCI Config *</label>
             <textarea v-model="cred.configText" class="form-control" rows="5" placeholder="粘贴 .oci/config 内容"></textarea>
@@ -276,6 +352,13 @@ const editTarget = ref(null)
 const editDnsTarget = ref(null)
 const testingId = ref(null)
 const testingDnsId = ref(null)
+const sortingId = ref(null)
+const sortingDnsId = ref(null)
+const togglingId = ref(null)
+const togglingDnsId = ref(null)
+const oracleAccountTypes = ref({})
+const oracleTypeLoadToken = ref(0)
+const ORACLE_ACCOUNT_TYPE_CACHE_VERSION = 6
 
 const DNS_PROVIDER_LABELS = {
   cloudflare: 'Cloudflare',
@@ -284,7 +367,7 @@ const DNS_PROVIDER_LABELS = {
   huaweicloud: 'Huawei Cloud DNS'
 }
 
-const defForm = () => ({ name: '', computeProvider: 'oracle' })
+const defForm = () => ({ name: '', computeProvider: 'oracle', oracleAccountTypeMode: 'auto' })
 const defDnsForm = () => ({ name: '', dnsProvider: 'cloudflare' })
 
 const form = ref(defForm())
@@ -301,9 +384,13 @@ onMounted(async () => {
 async function load() {
   loading.value = true
   try {
-    const [accountRes, dnsRes] = await Promise.all([accountsApi.list(), accountsApi.listDns()])
+    const [accountRes, dnsRes] = await Promise.all([
+      accountsApi.list({ includeDisabled: true }),
+      accountsApi.listDns({ includeDisabled: true })
+    ])
     accounts.value = accountRes.data || []
     dnsAccounts.value = dnsRes.data || []
+    loadMissingOracleAccountTypes()
   } catch (error) {
     window.$toast?.(error.message, 'error')
   } finally {
@@ -320,7 +407,11 @@ function openAdd() {
 
 function openEdit(account) {
   editTarget.value = account
-  form.value = { name: account.name, computeProvider: account.computeProvider }
+  form.value = {
+    name: account.name,
+    computeProvider: account.computeProvider,
+    oracleAccountTypeMode: account.oracleAccountTypeMode || 'auto'
+  }
   cred.value = { ...account.credentials }
   showModal.value = true
 }
@@ -374,7 +465,11 @@ async function saveAccount() {
       cred.value = { ...nextCred }
     }
 
-    const payload = { ...form.value, credentials: nextCred }
+    const payload = {
+      ...form.value,
+      oracleAccountTypeMode: form.value.computeProvider === 'oracle' ? form.value.oracleAccountTypeMode : undefined,
+      credentials: nextCred
+    }
     if (editTarget.value) {
       await accountsApi.update(editTarget.value.id, payload)
     } else {
@@ -445,7 +540,10 @@ async function deleteDns(account) {
 async function testAccount(account) {
   testingId.value = account.id
   try {
-    await accountsApi.test(account.id)
+    const response = await accountsApi.test(account.id)
+    if (isOracleAccount(account) && response.data?.oracleAccountType) {
+      keepOracleAccountType(account.id, normalizeOracleAccountType(response.data.oracleAccountType))
+    }
     window.$toast?.(`「${account.name}」连接成功`, 'success')
   } catch (error) {
     window.$toast?.(`连接失败: ${error.response?.data?.error || error.message}`, 'error')
@@ -463,6 +561,194 @@ async function testDns(account) {
     window.$toast?.(`连接失败: ${error.response?.data?.error || error.message}`, 'error')
   } finally {
     testingDnsId.value = null
+  }
+}
+
+function isEnabled(account) {
+  return account?.enabled !== false
+}
+
+function isOracleAccount(account) {
+  return account?.computeProvider === 'oracle'
+}
+
+function replaceById(items, nextItem) {
+  return items.map((item) => (item.id === nextItem.id ? nextItem : item))
+}
+
+function isValidOracleAccountType(data) {
+  return (
+    ['upgraded', 'free', 'unknown'].includes(data?.type) &&
+    data.cacheVersion === ORACLE_ACCOUNT_TYPE_CACHE_VERSION
+  )
+}
+
+function oracleAccountTypeInfo(account) {
+  if (isValidOracleAccountType(account?.oracleAccountType)) return account.oracleAccountType
+  return oracleAccountTypes.value[account.id] || {
+    type: 'loading',
+    label: '检测中',
+    reason: '正在读取 OCI 订阅信息'
+  }
+}
+
+function normalizeOracleAccountType(data) {
+  if (['upgraded', 'free', 'unknown'].includes(data?.type)) {
+    return {
+      ...data,
+      cacheVersion: data.cacheVersion || ORACLE_ACCOUNT_TYPE_CACHE_VERSION
+    }
+  }
+  return {
+    type: 'unknown',
+    label: '未知',
+    reason: '接口返回的账户类型无法识别',
+    cacheVersion: ORACLE_ACCOUNT_TYPE_CACHE_VERSION
+  }
+}
+
+function providerLabel(account) {
+  const provider = String(account?.computeProvider || '-').toUpperCase()
+  if (!isOracleAccount(account)) return provider
+
+  const info = oracleAccountTypeInfo(account)
+  return `${provider}（${info.label || '未知'}）`
+}
+
+function providerTitle(account) {
+  if (!isOracleAccount(account)) return ''
+
+  const info = oracleAccountTypeInfo(account)
+  const parts = [
+    info.reason,
+    info.homeRegionId ? `Home Region: ${info.homeRegionId}` : '',
+    info.checkedAt ? `检测时间: ${fmtDateTime(info.checkedAt)}` : ''
+  ]
+  return parts.filter(Boolean).join(' · ') || info.label
+}
+
+function keepOracleAccountType(accountId, info) {
+  if (!accounts.value.some((account) => account.id === accountId)) return
+  accounts.value = accounts.value.map((account) => (
+    account.id === accountId ? { ...account, oracleAccountType: info } : account
+  ))
+  oracleAccountTypes.value = {
+    ...oracleAccountTypes.value,
+    [accountId]: info
+  }
+}
+
+async function loadMissingOracleAccountTypes() {
+  const oracleAccounts = accounts.value.filter((account) => (
+    isOracleAccount(account) && !isValidOracleAccountType(account.oracleAccountType)
+  ))
+  const loadToken = oracleTypeLoadToken.value + 1
+  oracleTypeLoadToken.value = loadToken
+
+  oracleAccountTypes.value = Object.fromEntries(oracleAccounts.map((account) => [
+    account.id,
+    {
+      type: 'loading',
+      label: '检测中',
+      reason: '正在读取 OCI 订阅信息'
+    }
+  ]))
+
+  await Promise.allSettled(oracleAccounts.map(async (account) => {
+    try {
+      const response = await accountsApi.oracleAccountType(account.id)
+      if (oracleTypeLoadToken.value !== loadToken) return
+      keepOracleAccountType(account.id, normalizeOracleAccountType(response.data))
+    } catch (error) {
+      if (oracleTypeLoadToken.value !== loadToken) return
+      keepOracleAccountType(account.id, {
+        type: 'unknown',
+        label: '未知',
+        reason: error.response?.data?.error || error.message
+      })
+    }
+  }))
+}
+
+async function toggleAccount(account) {
+  const nextEnabled = !isEnabled(account)
+  togglingId.value = account.id
+  try {
+    const response = await accountsApi.update(account.id, { enabled: nextEnabled })
+    accounts.value = replaceById(accounts.value, response.data)
+    window.$toast?.(nextEnabled ? '账户已启用' : '账户已停用', 'success')
+  } catch (error) {
+    window.$toast?.(error.response?.data?.error || error.message, 'error')
+  } finally {
+    togglingId.value = null
+  }
+}
+
+async function toggleDnsAccount(account) {
+  const nextEnabled = !isEnabled(account)
+  togglingDnsId.value = account.id
+  try {
+    const response = await accountsApi.updateDns(account.id, { enabled: nextEnabled })
+    dnsAccounts.value = replaceById(dnsAccounts.value, response.data)
+    window.$toast?.(nextEnabled ? 'DNS 账户已启用' : 'DNS 账户已停用', 'success')
+  } catch (error) {
+    window.$toast?.(error.response?.data?.error || error.message, 'error')
+  } finally {
+    togglingDnsId.value = null
+  }
+}
+
+function moveItem(items, index, direction) {
+  const targetIndex = index + direction
+  if (targetIndex < 0 || targetIndex >= items.length) return items
+
+  const nextItems = [...items]
+  const [item] = nextItems.splice(index, 1)
+  nextItems.splice(targetIndex, 0, item)
+  return nextItems
+}
+
+async function moveAccount(index, direction) {
+  const current = accounts.value[index]
+  if (!current || sortingId.value) return
+
+  const previous = [...accounts.value]
+  const next = moveItem(accounts.value, index, direction)
+  if (next === accounts.value) return
+
+  sortingId.value = current.id
+  accounts.value = next
+  try {
+    const response = await accountsApi.reorder(next.map((item) => item.id))
+    accounts.value = response.data || next
+    window.$toast?.('账户排序已更新', 'success')
+  } catch (error) {
+    accounts.value = previous
+    window.$toast?.(error.response?.data?.error || error.message, 'error')
+  } finally {
+    sortingId.value = null
+  }
+}
+
+async function moveDnsAccount(index, direction) {
+  const current = dnsAccounts.value[index]
+  if (!current || sortingDnsId.value) return
+
+  const previous = [...dnsAccounts.value]
+  const next = moveItem(dnsAccounts.value, index, direction)
+  if (next === dnsAccounts.value) return
+
+  sortingDnsId.value = current.id
+  dnsAccounts.value = next
+  try {
+    const response = await accountsApi.reorderDns(next.map((item) => item.id))
+    dnsAccounts.value = response.data || next
+    window.$toast?.('DNS 账户排序已更新', 'success')
+  } catch (error) {
+    dnsAccounts.value = previous
+    window.$toast?.(error.response?.data?.error || error.message, 'error')
+  } finally {
+    sortingDnsId.value = null
   }
 }
 
@@ -554,6 +840,10 @@ function fmtDate(value) {
   return value ? new Date(value).toLocaleDateString('zh-CN') : '-'
 }
 
+function fmtDateTime(value) {
+  return value ? new Date(value).toLocaleString('zh-CN') : '-'
+}
+
 function providerBadge(provider) {
   if (provider === 'oracle') return 'badge-oracle'
   if (provider === 'aws') return 'badge-aws'
@@ -583,9 +873,33 @@ function providerBadge(provider) {
   font-weight: 500;
 }
 
+.sort-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.sort-button {
+  width: 32px;
+  min-width: 32px;
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+
 .summary-cell {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.status-toggle {
+  border: 0;
+  cursor: pointer;
+}
+
+.status-toggle:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .form-grid {

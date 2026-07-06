@@ -444,14 +444,14 @@ export default class AzureProvider extends BaseComputeProvider {
       .reduce((sum, point) => sum + Number(point.total || 0), 0)
   }
 
-  async _getVmNetworkUsage(vmId) {
+  async _getVmNetworkUsage(vmId, options = {}) {
     const token = await this._getArmToken()
-    const endTime = new Date()
-    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+    const endTime = options.endTime ? new Date(options.endTime) : new Date()
+    const startTime = options.startTime ? new Date(options.startTime) : new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
     const params = new URLSearchParams({
       'api-version': AZURE_MONITOR_METRICS_API_VERSION,
       timespan: `${startTime.toISOString()}/${endTime.toISOString()}`,
-      interval: 'PT1H',
+      interval: options.interval || 'PT1H',
       aggregation: 'Total',
       metricnames: 'Network In Total,Network Out Total'
     })
@@ -470,6 +470,29 @@ export default class AzureProvider extends BaseComputeProvider {
       networkInBytes24h: inMetric ? this._sumAzureMetricTotals(inMetric) : null,
       networkOutBytes24h: outMetric ? this._sumAzureMetricTotals(outMetric) : null
     }
+  }
+
+  async getNetworkUsage(instanceIds = [], options = {}) {
+    await this._ensureInitialized()
+    const usageMap = new Map()
+
+    await Promise.all(instanceIds.map(async (instanceId) => {
+      try {
+        const usage = await this._getVmNetworkUsage(instanceId, {
+          startTime: options.startTime,
+          endTime: options.endTime,
+          interval: options.interval || 'PT1H'
+        })
+        usageMap.set(instanceId, {
+          inBytes: usage.networkInBytes24h,
+          outBytes: usage.networkOutBytes24h
+        })
+      } catch (_) {
+        usageMap.set(instanceId, { inBytes: null, outBytes: null })
+      }
+    }))
+
+    return usageMap
   }
 
   async listInstances() {

@@ -12,9 +12,9 @@
 
     <div class="stats-grid">
       <div class="card stat-card">
-        <div class="stat-icon">AC / ON</div>
-        <div class="stat-value">{{ accounts.length }} / {{ enabledAccounts.length }}</div>
-        <div class="stat-label">总账户数 / 启用中的计算账户</div>
+        <div class="stat-icon">AC</div>
+        <div class="stat-value">{{ accounts.length }}</div>
+        <div class="stat-label">启用中的计算账户</div>
       </div>
       <div class="card stat-card">
         <div class="stat-icon">OCI</div>
@@ -91,7 +91,7 @@
 
     <div v-if="!loading && accounts.length === 0 && dnsAccounts.length === 0" class="card empty-card">
       <div class="empty-title">欢迎使用云管理平台</div>
-      <div class="empty-text">当前还没有配置任何计算账户或 DNS 账户。</div>
+      <div class="empty-text">当前没有启用的计算账户或 DNS 账户。</div>
       <router-link to="/accounts" class="btn btn-primary">前往添加账户</router-link>
     </div>
   </div>
@@ -109,8 +109,6 @@ const loading = ref(false)
 const oracleAccounts = computed(() => accounts.value.filter((item) => item.computeProvider === 'oracle'))
 const awsAccounts = computed(() => accounts.value.filter((item) => item.computeProvider === 'aws'))
 const azureAccounts = computed(() => accounts.value.filter((item) => item.computeProvider === 'azure'))
-const enabledAccounts = computed(() => accounts.value.filter((item) => item.enabled !== false))
-
 onMounted(loadAll)
 
 async function loadAll() {

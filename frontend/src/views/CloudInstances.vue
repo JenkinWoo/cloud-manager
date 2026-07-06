@@ -522,8 +522,8 @@ onBeforeUnmount(() => {
 
 async function loadAccounts() {
   const [accountRes, dnsRes] = await Promise.all([accountsApi.list(), accountsApi.listDns()])
-  accounts.value = (accountRes.data || []).filter((item) => item.computeProvider)
-  dnsAccounts.value = dnsRes.data || []
+  accounts.value = (accountRes.data || []).filter((item) => item.computeProvider && item.enabled !== false)
+  dnsAccounts.value = (dnsRes.data || []).filter((item) => item.enabled !== false)
 
   if (accounts.value.length && !selectedAccountId.value) {
     await selectAccount(accounts.value[0].id)

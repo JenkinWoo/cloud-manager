@@ -2,10 +2,12 @@ import { Router } from 'express'
 import { accountsDb, dnsAccountsDb } from '../db.mjs'
 import { getComputeProvider, getDnsProvider } from '../providers/registry.mjs'
 import { createTask } from '../queue.mjs'
+import { getCurrentMonthPeriod, syncTrafficUsage } from '../services/trafficUsage.mjs'
 import { validateOracleInstancePassword } from '../utils/oraclePassword.mjs'
 
 const router = Router({ mergeParams: true })
 const READ_TIMEOUT_MS = Number(process.env.CLOUD_READ_TIMEOUT_MS || 8000)
+const TRAFFIC_TIMEOUT_MS = Number(process.env.CLOUD_TRAFFIC_TIMEOUT_MS || 30000)
 
 function requireAccount(id) {
   const account = accountsDb.data.accounts.find((item) => item.id === id && item.enabled !== false)
@@ -125,6 +127,22 @@ router.get('/capabilities', async (req, res) => {
     const account = requireAccount(req.params.accountId)
     const provider = getScopedProvider(account, req)
     res.json({ provider: account.computeProvider, capabilities: provider.constructor.capabilities || [] })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/traffic-usage', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    const provider = getScopedProvider(account, req)
+    const period = getCurrentMonthPeriod()
+    const result = await withTimeout(
+      syncTrafficUsage(account, provider, period),
+      TRAFFIC_TIMEOUT_MS,
+      `${account.computeProvider} 云流量统计请求超时（>${TRAFFIC_TIMEOUT_MS}ms）`
+    )
+    res.json(result)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

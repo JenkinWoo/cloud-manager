@@ -39,6 +39,14 @@ export const operationLogsDb = new Low(operationLogsFile, { logs: [] })
 await operationLogsDb.read()
 
 /**
+ * 云流量监控快照
+ * Schema: { records: [{ accountId, monthKey, instanceId, networkInBytesMonth, networkOutBytesMonth, deleted, ... }] }
+ */
+const trafficUsageFile = new JSONFile(join(dataDir, 'traffic_usage.json'))
+export const trafficUsageDb = new Low(trafficUsageFile, { records: [] })
+await trafficUsageDb.read()
+
+/**
  * 全局设置 (Telegram 等无 Provider 化的配置)
  */
 const settingsFile = new JSONFile(join(dataDir, 'settings.json'))

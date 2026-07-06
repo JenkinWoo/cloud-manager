@@ -1,14 +1,121 @@
 import { createHash, createPublicKey } from 'crypto'
-import BaseComputeProvider from './BaseComputeProvider.mjs'
 import { validateOracleInstancePassword } from '../../utils/oraclePassword.mjs'
+import BaseComputeProvider from './BaseComputeProvider.mjs'
 
 let ociSdkPromise = null
+const PAID_COMPUTE_CORE_LIMIT_NAMES = [
+  'standard-e4-core-count',
+  'standard-e5-core-count',
+  'standard3-core-count',
+  'standard2-core-count'
+]
 
 async function loadOciSdk() {
   if (!ociSdkPromise) {
     ociSdkPromise = import('oci-sdk').then((mod) => mod.default || mod)
   }
   return ociSdkPromise
+}
+
+function toNumber(value) {
+  if (value === null || value === undefined || value === '') return null
+  const normalized = String(value).replace(/,/g, '').trim()
+  const number = Number(normalized)
+  return Number.isFinite(number) ? number : null
+}
+
+function hasPositiveValue(item, fields) {
+  return fields.some((field) => {
+    const number = toNumber(item?.[field])
+    return number !== null && number > 0
+  })
+}
+
+function includesAny(text, needles) {
+  const normalized = String(text || '').toLowerCase()
+  return needles.some((needle) => normalized.includes(needle))
+}
+
+function meaningfulPaymentValue(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized || ['0', 'none', 'no', 'n/a', 'na', 'null', 'undefined'].includes(normalized)) return false
+  if (includesAny(normalized, ['no payg', 'no_payg', 'not applicable'])) return false
+  return true
+}
+
+function subscriptionTextParts(item) {
+  return [
+    item?.serviceName,
+    item?.type,
+    item?.product?.name,
+    item?.product?.partNumber,
+    item?.pricingModel,
+    item?.programType,
+    item?.promoType,
+    item?.promotionPricingType,
+    item?.ratecardType
+  ]
+}
+
+function hasFreeTierSignal(item) {
+  return subscriptionTextParts(item).some((part) => includesAny(part, ['free tier', 'always free', 'free trial', 'trial']))
+}
+
+function hasUniversalCreditsSignal(item) {
+  return subscriptionTextParts(item).some((part) => includesAny(part, ['universal credits']))
+}
+
+function hasFreeAccountSignal(item) {
+  return hasFreeTierSignal(item) || hasUniversalCreditsSignal(item)
+}
+
+function paidEvidence(item, options = {}) {
+  const hasFreeSignal = options.freeContext || hasFreeAccountSignal(item)
+
+  const paidText = [
+    item?.pricingModel,
+    item?.programType,
+    item?.overagePolicy,
+    item?.billingFrequency,
+    item?.ratecardType,
+    item?.orderType,
+    item?.agreementType
+  ].find((part) => includesAny(part, ['paid', 'commit', 'annual']))
+
+  if (hasFreeSignal) {
+    return ''
+  }
+
+  if (item?.isPayg === true) return 'PAYG 标记'
+  if (item?.isIntentToPay === true && !hasFreeSignal) return '付费意向标记'
+
+  if (hasPositiveValue(item, ['systemArrInLc', 'systemArrInSc', 'systemAtrArrInLc', 'systemAtrArrInSc', 'revisedArrInLc', 'revisedArrInSc'])) {
+    return 'ARR 金额'
+  }
+
+  if (hasFreeSignal) return ''
+
+  if (meaningfulPaymentValue(item?.paygPolicy) && includesAny(item.paygPolicy, ['payg', 'pay as you go'])) {
+    return 'PAYG 付款策略'
+  }
+
+  if (hasPositiveValue(item, ['lineNetAmount', 'netUnitPrice'])) {
+    return '订阅净价'
+  }
+
+  return paidText ? `订阅字段 ${paidText}` : ''
+}
+
+function flattenSubscriptionSignals(subscriptions = []) {
+  return subscriptions.flatMap((subscription) => [
+    subscription,
+    ...(subscription.subscribedServices || []),
+    ...(subscription.commitmentServices || [])
+  ])
+}
+
+function errorMessage(error) {
+  return error?.serviceCode || error?.code || error?.message || 'OCI 订阅接口不可用'
 }
 
 export default class OracleProvider extends BaseComputeProvider {
@@ -40,6 +147,12 @@ export default class OracleProvider extends BaseComputeProvider {
     this.blockClient = null
     this.identityClient = null
     this.monitoringClient = null
+    this.limitsClient = null
+    this.organizationSubscriptionClient = null
+    this.subscriptionClient = null
+    this.subscribedServiceClient = null
+    this.regionId = null
+    this._homeRegionId = null
     this._initPromise = null
     this._availabilityDomains = []
   }
@@ -52,11 +165,12 @@ export default class OracleProvider extends BaseComputeProvider {
 
     this._initPromise = (async () => {
       const sdk = await loadOciSdk()
-      const { SimpleAuthenticationDetailsProvider, common, core, identity, monitoring } = sdk
+      const { SimpleAuthenticationDetailsProvider, common, core, identity, monitoring, limits, onesubscription } = sdk
 
       const config = this._parseOciConfig(this.configText, this.profile)
       const privateKeyText = this._resolvePrivateKeyText(this.rawPrivateKeyText)
       this._assertFingerprintMatches(config.fingerprint, privateKeyText)
+      this.regionId = config.region
 
       this.provider = new SimpleAuthenticationDetailsProvider(
         config.tenancy,
@@ -73,6 +187,18 @@ export default class OracleProvider extends BaseComputeProvider {
       this.blockClient = new core.BlockstorageClient({ authenticationDetailsProvider: this.provider })
       this.identityClient = new identity.IdentityClient({ authenticationDetailsProvider: this.provider })
       this.monitoringClient = new monitoring.MonitoringClient({ authenticationDetailsProvider: this.provider })
+      this.limitsClient = limits?.LimitsClient
+        ? new limits.LimitsClient({ authenticationDetailsProvider: this.provider })
+        : null
+      this.organizationSubscriptionClient = onesubscription?.OrganizationSubscriptionClient
+        ? new onesubscription.OrganizationSubscriptionClient({ authenticationDetailsProvider: this.provider })
+        : null
+      this.subscriptionClient = onesubscription?.SubscriptionClient
+        ? new onesubscription.SubscriptionClient({ authenticationDetailsProvider: this.provider })
+        : null
+      this.subscribedServiceClient = onesubscription?.SubscribedServiceClient
+        ? new onesubscription.SubscribedServiceClient({ authenticationDetailsProvider: this.provider })
+        : null
     })()
 
     try {
@@ -80,6 +206,246 @@ export default class OracleProvider extends BaseComputeProvider {
     } catch (err) {
       this._initPromise = null
       throw err
+    }
+  }
+
+  async _listComputeLimitValues(name) {
+    if (!this.limitsClient) {
+      throw new Error('当前 OCI SDK 不支持 Limits 接口')
+    }
+
+    const response = await this.limitsClient.listLimitValues({
+      compartmentId: this.compartmentId,
+      serviceName: 'compute',
+      name,
+      limit: 100
+    })
+
+    return (response.items || [])
+      .map((item) => ({
+        name: item.name || name,
+        value: Number(item.value),
+        scopeType: item.scopeType || '',
+        availabilityDomain: item.availabilityDomain || ''
+      }))
+      .filter((item) => item.name === name && Number.isFinite(item.value))
+  }
+
+  async _detectAccountTypeByLimitValues() {
+    await this._ensureInitialized()
+
+    const checkedLimits = []
+    const errors = []
+
+    for (const limitName of PAID_COMPUTE_CORE_LIMIT_NAMES) {
+      try {
+        const values = await this._listComputeLimitValues(limitName)
+        checkedLimits.push(...values)
+      } catch (error) {
+        errors.push(`${limitName}: ${errorMessage(error)}`)
+      }
+    }
+
+    if (checkedLimits.some((item) => item.value > 0)) {
+      const positiveLimits = checkedLimits
+        .filter((item) => item.value > 0)
+        .map((item) => `${item.name}=${item.value}`)
+
+      return {
+        type: 'upgraded',
+        label: '升级账户',
+        reason: `Limits API 检测到付费 Compute 核心限额大于 0：${positiveLimits.join(', ')}`,
+        source: 'oci-limits',
+        checkedLimits
+      }
+    }
+
+    if (checkedLimits.length) {
+      return {
+        type: 'free',
+        label: '免费账户',
+        reason: `Limits API 检测到付费 Compute 核心限额为 0：${[...new Set(checkedLimits.map((item) => item.name))].join(', ')}`,
+        source: 'oci-limits',
+        checkedLimits
+      }
+    }
+
+    return {
+      type: 'unknown',
+      label: '未知',
+      reason: errors.length ? `Limits API 未返回可用限额：${errors.join('；')}` : 'Limits API 未返回付费 Compute 核心限额',
+      source: 'oci-limits',
+      checkedLimits: []
+    }
+  }
+
+  async _getHomeRegionId() {
+    if (this._homeRegionId) return this._homeRegionId
+
+    try {
+      const response = await this.identityClient.listRegionSubscriptions({ tenancyId: this.compartmentId })
+      const homeRegion = (response.items || []).find((item) => item.isHomeRegion)
+      this._homeRegionId = homeRegion?.regionName || this.regionId
+    } catch (_) {
+      this._homeRegionId = this.regionId
+    }
+
+    return this._homeRegionId
+  }
+
+  async _setSubscriptionClientsHomeRegion() {
+    const homeRegionId = await this._getHomeRegionId()
+    for (const client of [this.organizationSubscriptionClient, this.subscriptionClient, this.subscribedServiceClient]) {
+      if (client && homeRegionId) client.regionId = homeRegionId
+    }
+    return homeRegionId
+  }
+
+  async _listOrganizationSubscriptions() {
+    if (!this.organizationSubscriptionClient) {
+      throw new Error('当前 OCI SDK 不支持订阅接口')
+    }
+
+    let page = undefined
+    const items = []
+    do {
+      const response = await this.organizationSubscriptionClient.listOrganizationSubscriptions({
+        compartmentId: this.compartmentId,
+        limit: 50,
+        page
+      })
+      items.push(...(response.items || []))
+      page = response.opcNextPage
+    } while (page)
+
+    return items
+  }
+
+  async _listSubscriptionDetails(subscriptionId) {
+    if (!this.subscriptionClient || !subscriptionId) return []
+
+    try {
+      const response = await this.subscriptionClient.listSubscriptions({
+        compartmentId: this.compartmentId,
+        subscriptionId,
+        isCommitInfoRequired: true,
+        limit: 50
+      })
+
+      console.log(response.items[0])
+      return response.items || []
+    } catch (_) {
+      return []
+    }
+  }
+
+  async _listSubscribedServices(subscriptionId) {
+    if (!this.subscribedServiceClient || !subscriptionId) return []
+
+    try {
+      const response = await this.subscribedServiceClient.listSubscribedServices({
+        compartmentId: this.compartmentId,
+        subscriptionId,
+        limit: 50
+      })
+      return response.items || []
+    } catch (_) {
+      return []
+    }
+  }
+
+  _classifyAccountType(signals, source) {
+    const freeContext = signals.some(hasFreeAccountSignal)
+    const paidSignal = signals.map((signal) => paidEvidence(signal, { freeContext })).find(Boolean)
+    if (paidSignal) {
+      return {
+        type: 'upgraded',
+        label: '升级账户',
+        reason: `OCI 订阅信息中检测到${paidSignal}`,
+        source
+      }
+    }
+
+    if (!signals.length || signals.some(hasFreeAccountSignal)) {
+      return {
+        type: 'free',
+        label: '免费账户',
+        reason: signals.length ? '订阅信息显示为免费额度/Universal Credits，且没有付款字段' : '订阅接口可访问，但没有返回付费订阅',
+        source
+      }
+    }
+
+    return {
+      type: 'unknown',
+      label: '未知',
+      reason: '订阅接口有返回数据，但没有足够字段判断免费或升级',
+      source
+    }
+  }
+
+  async getAccountType() {
+    await this._ensureInitialized()
+
+    try {
+      const limitResult = await this._detectAccountTypeByLimitValues()
+      if (limitResult.type !== 'unknown') {
+        return {
+          ...limitResult,
+          checkedAt: new Date().toISOString(),
+          homeRegionId: await this._getHomeRegionId(),
+          subscriptionCount: 0,
+          subscriptionIds: [],
+          serviceNames: []
+        }
+      }
+
+      const homeRegionId = await this._setSubscriptionClientsHomeRegion()
+      const organizationSubscriptions = await this._listOrganizationSubscriptions()
+      const detailResults = await Promise.all(organizationSubscriptions.map(async (subscription) => {
+        const [subscriptionDetails, subscribedServices] = await Promise.all([
+          this._listSubscriptionDetails(subscription.id),
+          this._listSubscribedServices(subscription.id)
+        ])
+        return [...subscriptionDetails, ...subscribedServices]
+      }))
+
+      const signals = [
+        ...organizationSubscriptions,
+        ...flattenSubscriptionSignals(detailResults.flat())
+      ]
+
+      const subscriptionType = this._classifyAccountType(signals, 'oci-onesubscription')
+      if (subscriptionType.type === 'free') {
+        return {
+          ...subscriptionType,
+          reason: `${limitResult.reason}；订阅兜底：${subscriptionType.reason}`,
+          checkedAt: new Date().toISOString(),
+          homeRegionId,
+          subscriptionCount: organizationSubscriptions.length,
+          subscriptionIds: organizationSubscriptions.map((item) => item.id).filter(Boolean),
+          serviceNames: [...new Set(signals.map((item) => item.serviceName || item.product?.name).filter(Boolean))].slice(0, 5)
+        }
+      }
+
+      return {
+        type: 'unknown',
+        label: '未知',
+        reason: `${limitResult.reason}；订阅字段未作为升级依据`,
+        source: 'oci-limits',
+        checkedAt: new Date().toISOString(),
+        homeRegionId,
+        subscriptionCount: organizationSubscriptions.length,
+        subscriptionIds: organizationSubscriptions.map((item) => item.id).filter(Boolean),
+        serviceNames: [...new Set(signals.map((item) => item.serviceName || item.product?.name).filter(Boolean))].slice(0, 5)
+      }
+    } catch (error) {
+      return {
+        type: 'unknown',
+        label: '未知',
+        reason: errorMessage(error),
+        source: 'oci-onesubscription',
+        checkedAt: new Date().toISOString()
+      }
     }
   }
 
@@ -243,34 +609,170 @@ export default class OracleProvider extends BaseComputeProvider {
     return total
   }
 
-  async _queryRecentNetworkMetric(instanceId, metricName) {
-    const endTime = new Date()
-    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+  _sumMetricDatapoints(items = []) {
+    const values = items
+      .flatMap((item) => item.aggregatedDatapoints || [])
+      .map((point) => Number(point.value))
+      .filter(Number.isFinite)
 
+    if (!values.length) return null
+    return values.reduce((sum, value) => sum + Math.max(0, value), 0)
+  }
+
+  async _queryComputeAgentNetworkMetric(instanceId, metricName, options = {}) {
+    const endTime = options.endTime ? new Date(options.endTime) : new Date()
+    const startTime = options.startTime ? new Date(options.startTime) : new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+    const interval = options.interval || '5m'
+    const resolution = options.resolution || interval
     const response = await this.monitoringClient.summarizeMetricsData({
       compartmentId: this.compartmentId,
       summarizeMetricsDataDetails: {
         namespace: 'oci_computeagent',
-        query: `${metricName}[5m]{resourceId = \"${instanceId}\"}.max()`,
+        query: `${metricName}[${interval}]{resourceId = \"${instanceId}\"}.max()`,
         startTime,
         endTime,
-        resolution: '5m'
+        resolution
       }
     })
 
     return this._sumCumulativeDatapoints(response.items || [])
   }
 
-  async _getRecentNetworkUsage(instanceId) {
-    const [networkInBytes24h, networkOutBytes24h] = await Promise.all([
-      this._queryRecentNetworkMetric(instanceId, 'NetworksBytesIn'),
-      this._queryRecentNetworkMetric(instanceId, 'NetworksBytesOut')
-    ])
+  async _queryVnicNetworkMetric(vnicId, metricName, options = {}) {
+    const endTime = options.endTime ? new Date(options.endTime) : new Date()
+    const startTime = options.startTime ? new Date(options.startTime) : new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+    const interval = options.interval || '1h'
+    const resolution = options.resolution || interval
+    const response = await this.monitoringClient.summarizeMetricsData({
+      compartmentId: this.compartmentId,
+      summarizeMetricsDataDetails: {
+        namespace: 'oci_vcn',
+        query: `${metricName}[${interval}]{resourceId = \"${vnicId}\"}.sum()`,
+        startTime,
+        endTime,
+        resolution
+      }
+    })
+
+    return this._sumMetricDatapoints(response.items || [])
+  }
+
+  async _getInstanceVnicIds(instanceId) {
+    const vnics = await this.computeClient.listVnicAttachments({ compartmentId: this.compartmentId, instanceId })
+    return (vnics.items || [])
+      .filter((item) => item.vnicId && item.lifecycleState !== 'DETACHED')
+      .map((item) => item.vnicId)
+  }
+
+  async _getVnicNetworkUsage(vnicIds = [], options = {}) {
+    let inBytes = 0
+    let outBytes = 0
+    let hasInBytes = false
+    let hasOutBytes = false
+
+    for (const vnicId of vnicIds) {
+      const [vnicInBytes, vnicOutBytes] = await Promise.all([
+        this._queryVnicNetworkMetric(vnicId, 'VnicFromNetworkBytes', options),
+        this._queryVnicNetworkMetric(vnicId, 'VnicToNetworkBytes', options)
+      ])
+
+      if (Number.isFinite(Number(vnicInBytes))) {
+        inBytes += Number(vnicInBytes)
+        hasInBytes = true
+      }
+      if (Number.isFinite(Number(vnicOutBytes))) {
+        outBytes += Number(vnicOutBytes)
+        hasOutBytes = true
+      }
+    }
 
     return {
-      networkInBytes24h: Number.isFinite(Number(networkInBytes24h)) ? Number(networkInBytes24h) : null,
-      networkOutBytes24h: Number.isFinite(Number(networkOutBytes24h)) ? Number(networkOutBytes24h) : null
+      inBytes: hasInBytes ? inBytes : null,
+      outBytes: hasOutBytes ? outBytes : null
     }
+  }
+
+  async _queryRecentNetworkMetric(instanceId, metricName) {
+    return this._queryComputeAgentNetworkMetric(instanceId, metricName, {
+      interval: '5m',
+      resolution: '5m'
+    })
+  }
+
+  async _getRecentNetworkUsage(instanceId) {
+    const vnicIds = await this._getInstanceVnicIds(instanceId)
+    let usage = { inBytes: null, outBytes: null }
+
+    if (vnicIds.length) {
+      try {
+        usage = await this._getVnicNetworkUsage(vnicIds, {
+          interval: '1h',
+          resolution: '1h'
+        })
+      } catch (_) {
+      }
+    }
+
+    if (usage.inBytes === null && usage.outBytes === null) {
+      const [computeAgentInBytes, computeAgentOutBytes] = await Promise.all([
+        this._queryRecentNetworkMetric(instanceId, 'NetworksBytesIn'),
+        this._queryRecentNetworkMetric(instanceId, 'NetworksBytesOut')
+      ])
+      usage = { inBytes: computeAgentInBytes, outBytes: computeAgentOutBytes }
+    }
+
+    return {
+      networkInBytes24h: Number.isFinite(Number(usage.inBytes)) ? Number(usage.inBytes) : null,
+      networkOutBytes24h: Number.isFinite(Number(usage.outBytes)) ? Number(usage.outBytes) : null
+    }
+  }
+
+  async getNetworkUsage(instanceIds = [], options = {}) {
+    await this._ensureInitialized()
+    const usageMap = new Map()
+
+    for (const instanceId of instanceIds) {
+      try {
+        const vnicIds = await this._getInstanceVnicIds(instanceId)
+        let usage = { inBytes: null, outBytes: null }
+
+        if (vnicIds.length) {
+          try {
+            usage = await this._getVnicNetworkUsage(vnicIds, {
+              startTime: options.startTime,
+              endTime: options.endTime,
+              interval: options.interval || '1h',
+              resolution: options.resolution || '1h'
+            })
+          } catch (_) {
+          }
+        }
+
+        if (usage.inBytes === null && usage.outBytes === null) {
+          const [computeAgentInBytes, computeAgentOutBytes] = await Promise.all([
+            this._queryComputeAgentNetworkMetric(instanceId, 'NetworksBytesIn', {
+              startTime: options.startTime,
+              endTime: options.endTime,
+              interval: options.interval || '1h',
+              resolution: options.resolution || '1h'
+            }),
+            this._queryComputeAgentNetworkMetric(instanceId, 'NetworksBytesOut', {
+              startTime: options.startTime,
+              endTime: options.endTime,
+              interval: options.interval || '1h',
+              resolution: options.resolution || '1h'
+            })
+          ])
+          usage = { inBytes: computeAgentInBytes, outBytes: computeAgentOutBytes }
+        }
+
+        usageMap.set(instanceId, usage)
+      } catch (_) {
+        usageMap.set(instanceId, { inBytes: null, outBytes: null })
+      }
+    }
+
+    return usageMap
   }
 
   async createInstance(params) {

@@ -12,6 +12,7 @@ const routes = [
   { path: '/', component: Dashboard, meta: { title: 'Dashboard' } },
   { path: '/accounts', component: Accounts, meta: { title: 'Accounts' } },
   { path: '/cloud', component: () => import('../views/CloudInstances.vue'), meta: { title: 'Cloud Instances' } },
+  { path: '/cloud-monitor', component: () => import('../views/CloudTrafficMonitor.vue'), meta: { title: 'Cloud Traffic Monitor' } },
   { path: '/dns', component: DnsManager, meta: { title: 'DNS Manager' } },
   { path: '/tasks', component: TaskQueue, meta: { title: 'Task Queue' } },
   { path: '/logs', component: SystemLogs, meta: { title: 'System Logs' } },
