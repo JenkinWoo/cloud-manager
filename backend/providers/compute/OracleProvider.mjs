@@ -387,7 +387,7 @@ export default class OracleProvider extends BaseComputeProvider {
       await this.networkClient.deletePublicIp({ publicIpId: pubRes.publicIp.id })
     }
 
-    const privateIpRes = await this.networkClient.listPrivateIps({ vnicId: vnics.items[0].vnicId })
+    const privateIpRes = await this.networkClient.listPrivateIps({ vnicId })
     const privateIpId = privateIpRes.items[0]?.id
     if (!privateIpId) throw new Error('找不到私网 IP')
 

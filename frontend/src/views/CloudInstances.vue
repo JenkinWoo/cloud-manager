@@ -450,7 +450,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { accountsApi, cloudApi } from '../api/index.js'
 
 const accounts = ref([])
@@ -501,8 +501,23 @@ const canCreate = computed(() => {
   return ['oracle', 'aws', 'azure'].includes(selectedAccount.value.computeProvider)
 })
 
+let refreshController = null
+let refreshRequestId = 0
+let azureSubscriptionsController = null
+let azureSubscriptionsRequestId = 0
+let azureLocationsController = null
+let azureLocationsRequestId = 0
+let azureVmSizesController = null
+let azureVmSizesRequestId = 0
+let volumesController = null
+let volumesRequestId = 0
+
 onMounted(async () => {
   await loadAccounts()
+})
+
+onBeforeUnmount(() => {
+  abortAccountScopedRequests()
 })
 
 async function loadAccounts() {
@@ -516,15 +531,22 @@ async function loadAccounts() {
 }
 
 async function selectAccount(id) {
+  const accountId = id
+  abortAccountScopedRequests()
+
   selectedAccountId.value = id
+  instances.value = []
+  elasticIps.value = []
+  capabilities.value = []
   resetTransientState()
 
   if (selectedAccount.value?.computeProvider === 'azure') {
-    await loadAzureSubscriptions()
+    await loadAzureSubscriptions(accountId)
   } else {
     resetAzureState()
   }
 
+  if (selectedAccountId.value !== accountId) return
   await refreshCurrent()
 }
 
@@ -550,13 +572,13 @@ function resetAzureState() {
   azureVmSizes.value = []
 }
 
-function getAzureSubscriptionStorageKey() {
-  return `cloud-manager:azure-subscription:${selectedAccountId.value}`
+function getAzureSubscriptionStorageKey(accountId = selectedAccountId.value) {
+  return `cloud-manager:azure-subscription:${accountId}`
 }
 
-function getRequestParams(extra = {}) {
-  if (isAzureAccount.value && azureSubscriptionId.value) {
-    return { ...extra, subscriptionId: azureSubscriptionId.value }
+function getRequestParams(extra = {}, account = selectedAccount.value, subscriptionId = azureSubscriptionId.value) {
+  if (account?.computeProvider === 'azure' && subscriptionId) {
+    return { ...extra, subscriptionId }
   }
   return extra
 }
@@ -589,6 +611,57 @@ function getVolumeLogTarget(volume) {
   }
 }
 
+function isAbortError(error) {
+  return error?.code === 'ERR_CANCELED' || error?.name === 'AbortError' || error?.name === 'CanceledError'
+}
+
+function abortController(controller) {
+  if (controller && !controller.signal.aborted) controller.abort()
+}
+
+function abortRefreshRequest() {
+  refreshRequestId += 1
+  abortController(refreshController)
+  refreshController = null
+  loading.value = false
+}
+
+function abortAzureVmSizesRequest() {
+  azureVmSizesRequestId += 1
+  abortController(azureVmSizesController)
+  azureVmSizesController = null
+  loadingAzureVmSizes.value = false
+}
+
+function abortAzureLocationRequests() {
+  azureLocationsRequestId += 1
+  abortController(azureLocationsController)
+  azureLocationsController = null
+  loadingAzureLocations.value = false
+  abortAzureVmSizesRequest()
+}
+
+function abortAzureRequests() {
+  azureSubscriptionsRequestId += 1
+  abortController(azureSubscriptionsController)
+  azureSubscriptionsController = null
+  loadingAzureSubscriptions.value = false
+  abortAzureLocationRequests()
+}
+
+function abortVolumesRequest() {
+  volumesRequestId += 1
+  abortController(volumesController)
+  volumesController = null
+  loadingVolumes.value = false
+}
+
+function abortAccountScopedRequests() {
+  abortRefreshRequest()
+  abortAzureRequests()
+  abortVolumesRequest()
+}
+
 function pickDefaultLocation(locations = []) {
   const preferred = ['eastasia', 'southeastasia', 'japaneast']
   const matched = preferred.find((name) => locations.some((item) => item.name === name))
@@ -601,85 +674,144 @@ function pickDefaultVmSize(sizes = []) {
   return matched || sizes[0]?.name || ''
 }
 
-async function loadAzureSubscriptions() {
-  if (!selectedAccountId.value) return
+async function loadAzureSubscriptions(accountId = selectedAccountId.value) {
+  if (!accountId) return
 
+  azureSubscriptionsRequestId += 1
+  const requestId = azureSubscriptionsRequestId
+  abortController(azureSubscriptionsController)
+  abortAzureLocationRequests()
+  const controller = new AbortController()
+  azureSubscriptionsController = controller
   loadingAzureSubscriptions.value = true
   resetAzureState()
 
   try {
-    const response = await cloudApi.listAzureSubscriptions(selectedAccountId.value)
+    const response = await cloudApi.listAzureSubscriptions(accountId, { signal: controller.signal })
+    if (controller.signal.aborted || requestId !== azureSubscriptionsRequestId || selectedAccountId.value !== accountId) return
+
     azureSubscriptions.value = response.data || []
 
-    const savedSubscriptionId = localStorage.getItem(getAzureSubscriptionStorageKey()) || ''
+    const savedSubscriptionId = localStorage.getItem(getAzureSubscriptionStorageKey(accountId)) || ''
     const selected =
       azureSubscriptions.value.find((item) => item.subscriptionId === savedSubscriptionId) || azureSubscriptions.value[0] || null
 
     azureSubscriptionId.value = selected?.subscriptionId || ''
     if (azureSubscriptionId.value) {
-      localStorage.setItem(getAzureSubscriptionStorageKey(), azureSubscriptionId.value)
-      await loadAzureLocations()
+      localStorage.setItem(getAzureSubscriptionStorageKey(accountId), azureSubscriptionId.value)
+      await loadAzureLocations(accountId, azureSubscriptionId.value)
     }
   } catch (error) {
+    if (isAbortError(error)) return
+    if (selectedAccountId.value !== accountId) return
     toast(error.response?.data?.error || error.message, 'error')
   } finally {
-    loadingAzureSubscriptions.value = false
+    if (requestId === azureSubscriptionsRequestId && azureSubscriptionsController === controller) {
+      loadingAzureSubscriptions.value = false
+      azureSubscriptionsController = null
+    }
   }
 }
 
-async function loadAzureLocations() {
+async function loadAzureLocations(accountId = selectedAccountId.value, subscriptionId = azureSubscriptionId.value) {
+  azureLocationsRequestId += 1
+  const requestId = azureLocationsRequestId
+  abortController(azureLocationsController)
+  azureLocationsController = null
+  abortAzureVmSizesRequest()
   azureLocations.value = []
   azureVmSizes.value = []
 
-  if (!selectedAccountId.value || !azureSubscriptionId.value) {
+  if (!accountId || !subscriptionId) {
     return
   }
 
+  const controller = new AbortController()
+  azureLocationsController = controller
   loadingAzureLocations.value = true
   try {
-    const response = await cloudApi.listAzureLocations(selectedAccountId.value, {
-      subscriptionId: azureSubscriptionId.value
-    })
+    const response = await cloudApi.listAzureLocations(accountId, { subscriptionId }, { signal: controller.signal })
+    if (
+      controller.signal.aborted ||
+      requestId !== azureLocationsRequestId ||
+      selectedAccountId.value !== accountId ||
+      azureSubscriptionId.value !== subscriptionId
+    ) {
+      return
+    }
+
     azureLocations.value = response.data || []
 
     const hasCurrentLocation = azureLocations.value.some((item) => item.name === createForm.value.location)
     createForm.value.location = hasCurrentLocation ? createForm.value.location : pickDefaultLocation(azureLocations.value)
 
-    await loadAzureVmSizes()
+    await loadAzureVmSizes(accountId, subscriptionId, createForm.value.location)
   } catch (error) {
+    if (isAbortError(error)) return
+    if (selectedAccountId.value !== accountId || azureSubscriptionId.value !== subscriptionId) return
     toast(error.response?.data?.error || error.message, 'error')
   } finally {
-    loadingAzureLocations.value = false
+    if (requestId === azureLocationsRequestId && azureLocationsController === controller) {
+      loadingAzureLocations.value = false
+      azureLocationsController = null
+    }
   }
 }
 
-async function loadAzureVmSizes() {
+async function loadAzureVmSizes(
+  accountId = selectedAccountId.value,
+  subscriptionId = azureSubscriptionId.value,
+  location = createForm.value.location
+) {
+  azureVmSizesRequestId += 1
+  const requestId = azureVmSizesRequestId
+  abortController(azureVmSizesController)
+  azureVmSizesController = null
   azureVmSizes.value = []
 
-  if (!selectedAccountId.value || !azureSubscriptionId.value || !createForm.value.location) {
+  if (!accountId || !subscriptionId || !location) {
     createForm.value.vmSize = ''
     return
   }
 
+  const controller = new AbortController()
+  azureVmSizesController = controller
   loadingAzureVmSizes.value = true
   try {
-    const response = await cloudApi.listAzureVmSizes(selectedAccountId.value, {
-      subscriptionId: azureSubscriptionId.value,
-      location: createForm.value.location
-    })
+    const response = await cloudApi.listAzureVmSizes(accountId, { subscriptionId, location }, { signal: controller.signal })
+    if (
+      controller.signal.aborted ||
+      requestId !== azureVmSizesRequestId ||
+      selectedAccountId.value !== accountId ||
+      azureSubscriptionId.value !== subscriptionId ||
+      createForm.value.location !== location
+    ) {
+      return
+    }
+
     azureVmSizes.value = response.data || []
 
     const hasCurrentVmSize = azureVmSizes.value.some((item) => item.name === createForm.value.vmSize)
     createForm.value.vmSize = hasCurrentVmSize ? createForm.value.vmSize : pickDefaultVmSize(azureVmSizes.value)
   } catch (error) {
+    if (isAbortError(error)) return
+    if (selectedAccountId.value !== accountId || azureSubscriptionId.value !== subscriptionId) return
     createForm.value.vmSize = ''
     toast(error.response?.data?.error || error.message, 'error')
   } finally {
-    loadingAzureVmSizes.value = false
+    if (requestId === azureVmSizesRequestId && azureVmSizesController === controller) {
+      loadingAzureVmSizes.value = false
+      azureVmSizesController = null
+    }
   }
 }
 
 async function handleAzureSubscriptionChange() {
+  const accountId = selectedAccountId.value
+  const subscriptionId = azureSubscriptionId.value
+  abortRefreshRequest()
+  abortAzureLocationRequests()
+
   if (!azureSubscriptionId.value) {
     azureLocations.value = []
     azureVmSizes.value = []
@@ -689,26 +821,31 @@ async function handleAzureSubscriptionChange() {
     return
   }
 
-  localStorage.setItem(getAzureSubscriptionStorageKey(), azureSubscriptionId.value)
+  localStorage.setItem(getAzureSubscriptionStorageKey(accountId), subscriptionId)
 
   if (showCreateModal.value) {
-    createForm.value.subscriptionId = azureSubscriptionId.value
+    createForm.value.subscriptionId = subscriptionId
     createForm.value.location = ''
     createForm.value.vmSize = ''
   }
 
-  await loadAzureLocations()
+  await loadAzureLocations(accountId, subscriptionId)
+  if (selectedAccountId.value !== accountId || azureSubscriptionId.value !== subscriptionId) return
   await refreshCurrent()
 }
 
 async function handleAzureLocationChange() {
   createForm.value.vmSize = ''
-  await loadAzureVmSizes()
+  await loadAzureVmSizes(selectedAccountId.value, azureSubscriptionId.value, createForm.value.location)
 }
 
 async function refreshCurrent() {
-  if (!selectedAccountId.value) return
-  if (isAzureAccount.value && !azureSubscriptionId.value) {
+  const accountId = selectedAccountId.value
+  const account = selectedAccount.value
+  const subscriptionId = azureSubscriptionId.value
+
+  if (!accountId) return
+  if (account?.computeProvider === 'azure' && !subscriptionId) {
     loading.value = false
     instances.value = []
     elasticIps.value = []
@@ -716,28 +853,57 @@ async function refreshCurrent() {
     return
   }
 
+  refreshRequestId += 1
+  const requestId = refreshRequestId
+  abortController(refreshController)
+  const controller = new AbortController()
+  refreshController = controller
   loading.value = true
   instances.value = []
   elasticIps.value = []
   capabilities.value = []
+  const requestParams = getRequestParams({}, account, subscriptionId)
 
   try {
     const [capabilitiesRes, instanceRes] = await Promise.all([
-      cloudApi.capabilities(selectedAccountId.value, getRequestParams()),
-      cloudApi.listInstances(selectedAccountId.value, getRequestParams())
+      cloudApi.capabilities(accountId, requestParams, { signal: controller.signal }),
+      cloudApi.listInstances(accountId, requestParams, { signal: controller.signal })
     ])
 
-    capabilities.value = capabilitiesRes.data.capabilities || []
+    if (
+      controller.signal.aborted ||
+      requestId !== refreshRequestId ||
+      selectedAccountId.value !== accountId ||
+      (account?.computeProvider === 'azure' && azureSubscriptionId.value !== subscriptionId)
+    ) {
+      return
+    }
+
+    const nextCapabilities = capabilitiesRes.data.capabilities || []
+    capabilities.value = nextCapabilities
     instances.value = instanceRes.data || []
 
-    if (hasCapability('elastic_ip')) {
-      const eipRes = await cloudApi.listElasticIps(selectedAccountId.value, getRequestParams())
+    if (nextCapabilities.includes('elastic_ip')) {
+      const eipRes = await cloudApi.listElasticIps(accountId, requestParams, { signal: controller.signal })
+      if (
+        controller.signal.aborted ||
+        requestId !== refreshRequestId ||
+        selectedAccountId.value !== accountId ||
+        (account?.computeProvider === 'azure' && azureSubscriptionId.value !== subscriptionId)
+      ) {
+        return
+      }
       elasticIps.value = eipRes.data || []
     }
   } catch (error) {
+    if (isAbortError(error)) return
+    if (selectedAccountId.value !== accountId) return
     toast(error.response?.data?.error || error.message, 'error')
   } finally {
-    loading.value = false
+    if (requestId === refreshRequestId && refreshController === controller) {
+      loading.value = false
+      refreshController = null
+    }
   }
 }
 
@@ -1022,17 +1188,45 @@ async function setupNetwork() {
 }
 
 async function openVolumesModal() {
+  const accountId = selectedAccountId.value
+  const account = selectedAccount.value
+  const subscriptionId = azureSubscriptionId.value
+
+  if (!accountId) return
+
+  volumesRequestId += 1
+  const requestId = volumesRequestId
+  abortController(volumesController)
+  const controller = new AbortController()
+  volumesController = controller
   showVolumesModal.value = true
   loadingVolumes.value = true
   volumes.value = []
 
   try {
-    const response = await cloudApi.listVolumes(selectedAccountId.value, getRequestParams())
+    const response = await cloudApi.listVolumes(
+      accountId,
+      getRequestParams({}, account, subscriptionId),
+      { signal: controller.signal }
+    )
+    if (
+      controller.signal.aborted ||
+      requestId !== volumesRequestId ||
+      selectedAccountId.value !== accountId ||
+      (account?.computeProvider === 'azure' && azureSubscriptionId.value !== subscriptionId)
+    ) {
+      return
+    }
     volumes.value = response.data || []
   } catch (error) {
+    if (isAbortError(error)) return
+    if (selectedAccountId.value !== accountId) return
     toast(error.response?.data?.error || error.message, 'error')
   } finally {
-    loadingVolumes.value = false
+    if (requestId === volumesRequestId && volumesController === controller) {
+      loadingVolumes.value = false
+      volumesController = null
+    }
   }
 }
 
