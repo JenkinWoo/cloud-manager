@@ -76,7 +76,7 @@ npm run dev
 快速启动：
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
 默认访问地址：
@@ -84,6 +84,51 @@ docker compose up -d --build
 ```text
 http://localhost:3001
 ```
+
+## 自动打包与更新
+
+项目提供 GitHub Actions 工作流：推送到 `master` 或推送 `v*` 标签时，会自动构建 Docker 镜像并推送到 GitHub Container Registry：
+
+```text
+ghcr.io/jenkinwoo/cloud-manager
+```
+
+镜像标签包含：
+
+- `latest`
+- `package.json` 中的版本号，例如 `1.3.1`
+- 当前提交 SHA
+
+应用左侧菜单会显示当前版本号，并通过后端 `/api/version` 检查 GitHub 上 `package.json` 的最新版本。发现新版本后，版本弹窗会显示最新版本号、GitHub 发布页入口，以及“立即更新并重启”按钮。
+
+Docker 部署时，`docker-compose.yml` 默认使用 GitHub Actions 构建好的镜像：
+
+```text
+ghcr.io/jenkinwoo/cloud-manager:latest
+```
+
+启动服务：
+
+```bash
+docker compose up -d
+```
+
+这样后续点击“立即更新并重启”时，不需要在服务器上重新 `docker compose up -d --build`。应用会调用 Watchtower HTTP API，Watchtower 拉取最新的 `latest` 镜像并重启 `cloud-manager` 容器。
+
+自动更新流程：
+
+1. 推送代码到 `master`。
+2. GitHub Actions 构建并推送 `ghcr.io/jenkinwoo/cloud-manager:latest`。
+3. 应用通过 `/api/version` 检查 GitHub 上的最新版本号。
+4. 发现新版本后，左侧版本弹窗提示更新。
+5. 点击“立即更新并重启”。
+6. 后端调用 Watchtower，拉取最新镜像并重启容器。
+7. 容器重启后运行新版本。
+8. 前端约 30 秒后自动刷新页面。
+
+如果你不是 Docker 部署，而是直接用 Node/PM2/systemd 运行源码，可以改用固定脚本模式：复制 `scripts/update-and-restart.example.sh` 为 `scripts/update-and-restart.sh`，修改最后的重启命令，并配置 `APP_UPDATE_SCRIPT="scripts/update-and-restart.sh"`。
+
+注意：Docker 自动更新需要 Watchtower 访问 Docker Socket，请只在可信服务器上使用。Watchtower 的 HTTP API 没有映射到宿主机端口，只供 Compose 内部网络中的应用容器调用。
 
 ## 环境变量
 
@@ -94,6 +139,10 @@ http://localhost:3001
 | `PORT` | `3001` | 后端服务监听端口。 |
 | `CLOUD_READ_TIMEOUT_MS` | `8000` | 云资源读取接口的超时时间，单位毫秒。 |
 | `OPERATION_LOG_MAX` | `1000` | 操作日志最多保留条数；系统设置中的日志保留天数会同时生效，默认保留最近 30 天。 |
+| `APP_UPDATE_PACKAGE_URL` | `https://raw.githubusercontent.com/JenkinWoo/cloud-manager/master/package.json` | 版本检查使用的远程 `package.json` 地址。 |
+| `APP_UPDATE_RELEASE_URL` | `https://github.com/JenkinWoo/cloud-manager/releases` | 版本弹窗的 GitHub 更新页面地址。 |
+| `APP_UPDATE_WEBHOOK_URL` | 空 | Docker 自动更新触发地址；`docker-compose.yml` 中默认指向 Watchtower。 |
+| `APP_UPDATE_SCRIPT` | 空 | 非 Docker 部署时使用的固定部署脚本路径。未配置 Webhook 或脚本时，前端只显示更新提示，不允许点击自动更新。 |
 
 ## 数据说明
 

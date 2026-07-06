@@ -2,15 +2,24 @@ version: "3.9"
 
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: oracle-app
+    image: ghcr.io/jenkinwoo/cloud-manager:latest
+    container_name: cloud-manager
     ports:
       - "3001:3001"
     environment:
       NODE_ENV: production
       PORT: 3001
+      APP_UPDATE_WEBHOOK_URL: http://watchtower:8080/v1/update
     volumes:
       - ./backend/data:/app/backend/data
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    restart: unless-stopped
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: cloud-manager-watchtower
+    command: --cleanup --label-enable --http-api-update
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped

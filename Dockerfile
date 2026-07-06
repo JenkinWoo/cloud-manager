@@ -2,6 +2,7 @@ FROM node:22-bookworm-slim AS frontend-builder
 
 WORKDIR /app/frontend
 
+COPY package.json ../package.json
 COPY frontend/package*.json ./
 RUN npm ci
 

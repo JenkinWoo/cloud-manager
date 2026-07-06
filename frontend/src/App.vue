@@ -6,7 +6,67 @@
       <div>
         <div class="sidebar-brand">
           <span class="brand-icon">☁️</span>
-          <span class="brand-text">云管理平台</span>
+          <div class="brand-copy">
+            <span class="brand-text">云管理平台</span>
+            <button
+              class="brand-version"
+              type="button"
+              :class="{ 'brand-version-update': versionInfo.updateAvailable }"
+              @click.stop="toggleVersionPopover"
+            >
+              v{{ displayVersion }}
+              <span v-if="versionInfo.updateAvailable" class="brand-update-dot"></span>
+            </button>
+          </div>
+
+          <div v-if="versionPopoverOpen" class="version-popover" @click.stop>
+            <div class="version-popover-header">
+              <span>{{ versionInfo.updateAvailable ? '发现新版本' : '当前版本' }}</span>
+              <button
+                class="version-refresh"
+                type="button"
+                :disabled="versionChecking"
+                title="刷新版本检查"
+                @click="checkVersion({ manual: true })"
+              >
+                ↻
+              </button>
+            </div>
+
+            <div class="version-popover-body">
+              <div class="version-main">
+                v{{ versionInfo.updateAvailable ? versionInfo.latest : displayVersion }}
+                <span :class="['version-status-dot', versionInfo.updateAvailable ? 'version-status-new' : 'version-status-ok']">
+                  {{ versionInfo.updateAvailable ? '!' : '✓' }}
+                </span>
+              </div>
+              <div class="version-status-text">
+                {{ versionStatusText }}
+              </div>
+              <div v-if="versionInfo.updateAvailable" class="version-current">
+                当前版本 v{{ displayVersion }}
+              </div>
+            </div>
+
+            <button
+              v-if="versionInfo.updateAvailable"
+              class="version-update-button"
+              type="button"
+              :disabled="!versionInfo.updateSupported || versionUpdating"
+              @click="triggerUpdate"
+            >
+              {{ versionUpdateButtonText }}
+            </button>
+
+            <a
+              class="version-release-link"
+              :href="versionInfo.releaseUrl"
+              target="_blank"
+              rel="noreferrer"
+            >
+              GitHub 查看发布
+            </a>
+          </div>
         </div>
 
         <div class="nav-section">
@@ -71,37 +131,127 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getAuthToken } from './api/index.js'
+import { getAuthToken, versionApi } from './api/index.js'
 import { authState, initAuth, logout } from './auth.js'
 
 const route = useRoute()
 const router = useRouter()
 const pendingCount = ref(0)
 const toasts = ref([])
+const appVersion = __APP_VERSION__
+const versionInfo = ref({
+  current: appVersion,
+  latest: null,
+  updateAvailable: false,
+  updateSupported: false,
+  releaseUrl: 'https://github.com/JenkinWoo/cloud-manager/releases',
+  error: null
+})
+const versionPopoverOpen = ref(false)
+const versionChecking = ref(false)
+const versionUpdating = ref(false)
 const isPublicRoute = computed(() => Boolean(route.meta.public))
+const displayVersion = computed(() => versionInfo.value.current || appVersion)
+const versionStatusText = computed(() => {
+  if (versionUpdating.value) return '正在触发自动更新'
+  if (versionChecking.value) return '正在检查更新'
+  if (versionInfo.value.error) return '暂时无法检查更新'
+  if (versionInfo.value.updateAvailable) return `最新版本 v${versionInfo.value.latest} 可用`
+  return '已是最新版本'
+})
+const versionUpdateButtonText = computed(() => {
+  if (versionUpdating.value) return '正在更新...'
+  if (!versionInfo.value.updateSupported) return '未配置自动更新'
+  return '立即更新并重启'
+})
 let sseSource = null
 
 onMounted(() => {
   initAuth()
+  window.addEventListener('click', closeVersionPopover)
 })
 
 onUnmounted(() => {
   closeSSE()
+  window.removeEventListener('click', closeVersionPopover)
 })
 
 watch(
   () => authState.authenticated,
   (authenticated) => {
-    if (authenticated && !isPublicRoute.value) connectSSE()
-    else closeSSE()
+    if (authenticated && !isPublicRoute.value) {
+      connectSSE()
+      checkVersion()
+    } else closeSSE()
   },
   { immediate: true }
 )
 
 watch(isPublicRoute, (publicRoute) => {
   if (publicRoute) closeSSE()
-  else if (authState.authenticated) connectSSE()
+  else if (authState.authenticated) {
+    connectSSE()
+    checkVersion()
+  }
 })
+
+async function checkVersion(options = {}) {
+  versionChecking.value = true
+  try {
+    const response = await versionApi.get()
+    versionInfo.value = {
+      current: response.data.current || appVersion,
+      latest: response.data.latest,
+      updateAvailable: Boolean(response.data.updateAvailable),
+      updateSupported: Boolean(response.data.updateSupported),
+      releaseUrl: response.data.releaseUrl || versionInfo.value.releaseUrl,
+      error: response.data.error || null
+    }
+
+    if (versionInfo.value.updateAvailable) {
+      const seenKey = `cloud-manager-update-${versionInfo.value.latest}`
+      if (options.manual || sessionStorage.getItem(seenKey) !== 'seen') {
+        versionPopoverOpen.value = true
+        sessionStorage.setItem(seenKey, 'seen')
+      }
+    }
+  } catch (_) {
+    versionInfo.value = {
+      current: appVersion,
+      latest: null,
+      updateAvailable: false,
+      updateSupported: false,
+      releaseUrl: versionInfo.value.releaseUrl,
+      error: 'version-check-failed'
+    }
+  } finally {
+    versionChecking.value = false
+  }
+}
+
+function toggleVersionPopover() {
+  versionPopoverOpen.value = !versionPopoverOpen.value
+}
+
+function closeVersionPopover() {
+  versionPopoverOpen.value = false
+}
+
+async function triggerUpdate() {
+  if (versionUpdating.value || !versionInfo.value.updateAvailable || !versionInfo.value.updateSupported) return
+
+  versionUpdating.value = true
+  try {
+    const response = await versionApi.update()
+    showToast(`正在更新到 v${response.data.latest}，服务稍后会自动重启`, 'success')
+    setTimeout(() => {
+      window.location.reload()
+    }, 30000)
+  } catch (error) {
+    showToast(error.response?.data?.error || error.message || '更新触发失败', 'error')
+    versionUpdating.value = false
+  }
+}
 
 function connectSSE() {
   const token = getAuthToken()
@@ -181,10 +331,191 @@ window.$toast = showToast
   font-weight: 700;
   color: var(--text-primary);
   letter-spacing: -0.3px;
+  position: relative;
 }
 
 .brand-icon {
   font-size: 24px;
+}
+
+.brand-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.brand-version {
+  align-self: flex-start;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: 8px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  line-height: 1.25;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
+}
+
+.brand-version:hover,
+.brand-version-update {
+  border-color: rgba(91, 140, 255, 0.45);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.brand-update-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 10px rgba(52, 211, 153, 0.7);
+}
+
+.version-popover {
+  position: fixed;
+  top: 58px;
+  left: 60px;
+  width: 256px;
+  z-index: 1200;
+  background: #172033;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.42);
+  overflow: hidden;
+}
+
+.version-popover-header {
+  height: 52px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.version-refresh {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.version-refresh:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-card);
+}
+
+.version-refresh:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.version-popover-body {
+  padding: 24px 16px 18px;
+  text-align: center;
+}
+
+.version-main {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--text-primary);
+}
+
+.version-status-dot {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.version-status-ok {
+  color: var(--green);
+  background: var(--green-dim);
+}
+
+.version-status-new {
+  color: var(--yellow);
+  background: var(--yellow-dim);
+}
+
+.version-status-text {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.version-current {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.version-update-button {
+  width: calc(100% - 32px);
+  margin: 0 16px 12px;
+  height: 36px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.2s, opacity 0.2s;
+}
+
+.version-update-button:hover:not(:disabled) {
+  background: #7aa3ff;
+}
+
+.version-update-button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.version-release-link {
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.version-release-link:hover {
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .nav-section {

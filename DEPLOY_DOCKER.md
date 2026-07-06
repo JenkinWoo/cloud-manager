@@ -16,7 +16,7 @@
 在项目根目录执行：
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
 启动后访问：
@@ -30,7 +30,8 @@ http://localhost:3001
 启动或更新：
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 停止服务：
@@ -96,44 +97,69 @@ environment:
   OPERATION_LOG_MAX: 2000
 ```
 
-## 直接使用 Docker 命令
+## 点击更新并自动重启
+
+`docker-compose.yml` 默认启动两个服务：
+
+- `cloud-manager`：业务应用，使用 `ghcr.io/jenkinwoo/cloud-manager:latest`
+- `cloud-manager-watchtower`：只在点击更新时拉取新镜像并重启业务容器
+
+完整流程：
+
+1. 推送代码到 GitHub。
+2. GitHub Actions 构建并推送新镜像。
+3. 应用检测到新的 `package.json` 版本号。
+4. 在左侧版本弹窗点击“立即更新并重启”。
+5. Watchtower 拉取最新镜像并重启 `cloud-manager` 容器。
+
+Watchtower 的 HTTP API 没有映射到宿主机端口，只供 Compose 内部网络中的应用容器调用。
+
+## 本地手动构建镜像
+
+如果你不使用 GitHub Actions 预构建镜像，也可以手动构建镜像：
 
 构建镜像：
 
 ```bash
-docker build -t oracle-app .
+docker build -t cloud-manager .
 ```
 
 Linux / macOS 运行：
 
 ```bash
 docker run -d \
-  --name oracle-app \
+  --name cloud-manager \
   -p 3001:3001 \
   -e NODE_ENV=production \
   -e PORT=3001 \
   -v $(pwd)/backend/data:/app/backend/data \
-  oracle-app
+  cloud-manager
 ```
 
 Windows PowerShell 运行：
 
 ```powershell
 docker run -d `
-  --name oracle-app `
+  --name cloud-manager `
   -p 3001:3001 `
   -e NODE_ENV=production `
   -e PORT=3001 `
   -v ${PWD}/backend/data:/app/backend/data `
-  oracle-app
+  cloud-manager
 ```
 
 ## 更新部署
 
-代码更新后执行：
+使用预构建镜像时执行：
 
 ```bash
-docker compose down
+docker compose pull
+docker compose up -d
+```
+
+如果你选择本地手动构建镜像，才需要执行：
+
+```bash
 docker compose up -d --build
 ```
 

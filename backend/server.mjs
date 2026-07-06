@@ -11,6 +11,7 @@ import dnsRouter from './routes/dnsRoute.mjs'
 import logsRouter from './routes/logs.mjs'
 import settingsRouter from './routes/settings.mjs'
 import tasksRouter from './routes/tasks.mjs'
+import versionRouter from './routes/version.mjs'
 import { ensureAuthConfig } from './utils/auth.mjs'
 import { cleanupExpiredOperationLogs, operationLogMiddleware } from './utils/operationLog.mjs'
 
@@ -41,6 +42,7 @@ app.use('/api/dns/:dnsAccountId', dnsRouter)
 app.use('/api/tasks', tasksRouter)
 app.use('/api/settings', settingsRouter)
 app.use('/api/logs', logsRouter)
+app.use('/api/version', versionRouter)
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() })

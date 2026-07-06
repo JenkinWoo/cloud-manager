@@ -130,3 +130,8 @@ export const authApi = {
 export const providersApi = {
   list: () => api.get('/providers')
 }
+
+export const versionApi = {
+  get: () => api.get('/version'),
+  update: () => api.post('/version/update')
+}
