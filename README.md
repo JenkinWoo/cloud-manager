@@ -128,8 +128,6 @@ docker compose up -d
 
 如果你不是 Docker 部署，而是直接用 Node/PM2/systemd 运行源码，可以改用固定脚本模式：复制 `scripts/update-and-restart.example.sh` 为 `scripts/update-and-restart.sh`，修改最后的重启命令，并配置 `APP_UPDATE_SCRIPT="scripts/update-and-restart.sh"`。
 
-注意：Docker 自动更新需要 Watchtower 访问 Docker Socket，请只在可信服务器上使用。Watchtower 的 HTTP API 没有映射到宿主机端口，只供 Compose 内部网络中的应用容器调用。
-
 ## 环境变量
 
 后端支持以下环境变量：
@@ -142,6 +140,7 @@ docker compose up -d
 | `APP_UPDATE_PACKAGE_URL` | `https://raw.githubusercontent.com/JenkinWoo/cloud-manager/master/package.json` | 版本检查使用的远程 `package.json` 地址。 |
 | `APP_UPDATE_RELEASE_URL` | `https://github.com/JenkinWoo/cloud-manager/releases` | 版本弹窗的 GitHub 更新页面地址。 |
 | `APP_UPDATE_WEBHOOK_URL` | 空 | Docker 自动更新触发地址；`docker-compose.yml` 中默认指向 Watchtower。 |
+| `APP_UPDATE_WEBHOOK_TOKEN` | 空 | 调用自动更新 Webhook 时使用的 Bearer Token；Docker 部署中已由 `docker-compose.yml` 内部配置，通常不需要手动设置。 |
 | `APP_UPDATE_SCRIPT` | 空 | 非 Docker 部署时使用的固定部署脚本路径。未配置 Webhook 或脚本时，前端只显示更新提示，不允许点击自动更新。 |
 
 ## 数据说明

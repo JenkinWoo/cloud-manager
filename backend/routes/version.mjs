@@ -17,6 +17,7 @@ const releaseUrl =
   'https://github.com/JenkinWoo/cloud-manager/releases'
 const updateScript = process.env.APP_UPDATE_SCRIPT || ''
 const updateWebhookUrl = process.env.APP_UPDATE_WEBHOOK_URL || ''
+const updateWebhookToken = process.env.APP_UPDATE_WEBHOOK_TOKEN || ''
 
 let cachedResult = null
 let cachedAt = 0
@@ -61,6 +62,10 @@ async function triggerUpdateWebhook(currentPackage, latest) {
     Accept: 'application/json',
     'Content-Type': 'application/json',
     'User-Agent': 'cloud-manager-update-trigger'
+  }
+
+  if (updateWebhookToken) {
+    headers.Authorization = `Bearer ${updateWebhookToken}`
   }
 
   const response = await fetch(updateWebhookUrl, {
@@ -131,6 +136,7 @@ router.get('/', async (req, res) => {
     current: currentPackage.version,
     latest: null,
     updateAvailable: false,
+    updateMode: updateScript ? 'script' : updateWebhookUrl ? 'webhook' : '',
     updateSupported: Boolean(updateScript || updateWebhookUrl),
     checkedAt: null,
     source: latestPackageUrl,
@@ -167,8 +173,6 @@ router.post('/update', async (req, res) => {
   try {
     if (updateScript) {
       await triggerUpdateScript(currentPackage, latest)
-    } else {
-      await triggerUpdateWebhook(currentPackage, latest)
     }
 
     res.json({
@@ -177,8 +181,19 @@ router.post('/update', async (req, res) => {
       current: currentPackage.version,
       latest: latest.version
     })
+
+    if (!updateScript && updateWebhookUrl) {
+      setTimeout(() => {
+        triggerUpdateWebhook(currentPackage, latest).catch((error) => {
+          console.error('Failed to trigger update webhook:', error.message, error.detail || '')
+        })
+      }, 1000)
+    }
   } catch (error) {
-    res.status(502).json({ error: error.message || '更新触发失败' })
+    res.status(502).json({
+      error: error.message || '更新触发失败',
+      detail: error.detail || null
+    })
   }
 })
 

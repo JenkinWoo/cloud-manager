@@ -58,6 +58,16 @@
               {{ versionUpdateButtonText }}
             </button>
 
+            <div v-if="versionUpdating" class="version-progress">
+              <div class="version-progress-meta">
+                <span>{{ versionProgressText }}</span>
+                <span>{{ versionUpdateProgress }}%</span>
+              </div>
+              <div class="version-progress-track">
+                <div class="version-progress-bar" :style="{ width: `${versionUpdateProgress}%` }"></div>
+              </div>
+            </div>
+
             <a
               class="version-release-link"
               :href="versionInfo.releaseUrl"
@@ -144,12 +154,15 @@ const versionInfo = ref({
   latest: null,
   updateAvailable: false,
   updateSupported: false,
+  updateMode: '',
   releaseUrl: 'https://github.com/JenkinWoo/cloud-manager/releases',
   error: null
 })
 const versionPopoverOpen = ref(false)
 const versionChecking = ref(false)
 const versionUpdating = ref(false)
+const versionUpdateProgress = ref(0)
+const versionProgressText = ref('')
 const isPublicRoute = computed(() => Boolean(route.meta.public))
 const displayVersion = computed(() => versionInfo.value.current || appVersion)
 const versionStatusText = computed(() => {
@@ -165,6 +178,7 @@ const versionUpdateButtonText = computed(() => {
   return '立即更新并重启'
 })
 let sseSource = null
+let versionProgressTimer = null
 
 onMounted(() => {
   initAuth()
@@ -173,6 +187,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   closeSSE()
+  stopVersionProgress()
   window.removeEventListener('click', closeVersionPopover)
 })
 
@@ -204,6 +219,7 @@ async function checkVersion(options = {}) {
       latest: response.data.latest,
       updateAvailable: Boolean(response.data.updateAvailable),
       updateSupported: Boolean(response.data.updateSupported),
+      updateMode: response.data.updateMode || '',
       releaseUrl: response.data.releaseUrl || versionInfo.value.releaseUrl,
       error: response.data.error || null
     }
@@ -221,6 +237,7 @@ async function checkVersion(options = {}) {
       latest: null,
       updateAvailable: false,
       updateSupported: false,
+      updateMode: '',
       releaseUrl: versionInfo.value.releaseUrl,
       error: 'version-check-failed'
     }
@@ -241,16 +258,63 @@ async function triggerUpdate() {
   if (versionUpdating.value || !versionInfo.value.updateAvailable || !versionInfo.value.updateSupported) return
 
   versionUpdating.value = true
+  startVersionProgress()
   try {
     const response = await versionApi.update()
-    showToast(`正在更新到 v${response.data.latest}，服务稍后会自动重启`, 'success')
+    const reloadDelayMs = response.data.status === 'watching' ? 90000 : 30000
+    startVersionProgress(reloadDelayMs)
+    setVersionProgress(30, response.data.status === 'watching' ? '等待自动更新检查' : '更新请求已发送')
+    showToast(
+      response.data.status === 'watching'
+        ? `正在等待自动更新到 v${response.data.latest}，服务稍后会自动重启`
+        : `正在更新到 v${response.data.latest}，服务稍后会自动重启`,
+      'success'
+    )
     setTimeout(() => {
+      setVersionProgress(100, '正在刷新页面')
       window.location.reload()
-    }, 30000)
+    }, reloadDelayMs)
   } catch (error) {
-    showToast(error.response?.data?.error || error.message || '更新触发失败', 'error')
+    const detail = error.response?.data?.detail
+    const message = error.response?.data?.error || error.message || '更新触发失败'
+    showToast(detail ? `${message}: ${detail}` : message, 'error')
+    stopVersionProgress()
     versionUpdating.value = false
   }
+}
+
+function setVersionProgress(progress, text) {
+  versionUpdateProgress.value = Math.max(versionUpdateProgress.value, Math.min(progress, 100))
+  versionProgressText.value = text
+}
+
+function startVersionProgress(durationMs = 30000) {
+  stopVersionProgress()
+  versionUpdateProgress.value = 8
+  versionProgressText.value = '正在触发更新'
+
+  const startedAt = Date.now()
+  versionProgressTimer = setInterval(() => {
+    const elapsed = Date.now() - startedAt
+    const progress = Math.min(96, 30 + Math.round((elapsed / durationMs) * 66))
+
+    if (progress < 45) {
+      setVersionProgress(progress, '正在拉取新镜像')
+    } else if (progress < 78) {
+      setVersionProgress(progress, '正在重启服务')
+    } else {
+      setVersionProgress(progress, '等待服务恢复')
+    }
+  }, 800)
+}
+
+function stopVersionProgress() {
+  if (versionProgressTimer) {
+    clearInterval(versionProgressTimer)
+    versionProgressTimer = null
+  }
+  versionUpdateProgress.value = 0
+  versionProgressText.value = ''
 }
 
 function connectSSE() {
@@ -498,6 +562,33 @@ window.$toast = showToast
 .version-update-button:disabled {
   opacity: 0.48;
   cursor: not-allowed;
+}
+
+.version-progress {
+  margin: 0 16px 14px;
+}
+
+.version-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 7px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.version-progress-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.version-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--green));
+  transition: width 0.45s ease;
 }
 
 .version-release-link {

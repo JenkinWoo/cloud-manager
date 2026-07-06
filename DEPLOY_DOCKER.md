@@ -11,8 +11,6 @@
 - 前端静态文件会在镜像构建时打包
 - 数据目录挂载为 `./backend/data`
 
-## 推荐部署方式
-
 在项目根目录执行：
 
 ```bash
@@ -113,6 +111,44 @@ environment:
 5. Watchtower 拉取最新镜像并重启 `cloud-manager` 容器。
 
 Watchtower 的 HTTP API 没有映射到宿主机端口，只供 Compose 内部网络中的应用容器调用。
+
+## 本地构建并推送镜像测试更新
+
+如果你不想每次都依赖 GitHub Actions 构建镜像，也可以在本地或 Debian 服务器上手动构建并推送到 GHCR：
+
+```bash
+docker login ghcr.io
+docker buildx create --use
+chmod +x scripts/publish-docker-local.sh
+./scripts/publish-docker-local.sh
+```
+
+也可以指定版本：
+
+```bash
+./scripts/publish-docker-local.sh 1.3.3
+```
+
+测试自动更新时需要同时满足两件事：
+
+1. GitHub 上的根 `package.json` 版本号比当前容器内版本高。
+2. GHCR 中已经有对应的新镜像，至少要更新 `ghcr.io/jenkinwoo/cloud-manager:latest`。
+
+完整测试流程：
+
+```bash
+# 1. 修改 package.json / package-lock.json 的版本号并提交到 GitHub
+git add package.json package-lock.json
+git commit -m "chore: bump version"
+git push
+
+# 2. 本地或 Debian 上构建并推送镜像
+./scripts/publish-docker-local.sh
+
+# 3. 打开页面，点击版本弹窗中的“立即更新并重启”
+```
+
+如果只改 GitHub 的 `package.json`，页面能发现新版本，但点击更新时 Watchtower 拉不到新镜像，实际版本不会变化。
 
 ## 本地手动构建镜像
 
