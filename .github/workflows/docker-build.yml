@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - master
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -19,26 +17,70 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Read package version
-        id: package
+      - name: Prepare build metadata
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
+          set -euo pipefail
+
+          read_package_version() {
+            node -e "let input=''; process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => { try { console.log(JSON.parse(input).version || '') } catch { console.log('') } })"
+          }
+
+          read_version_from_ref() {
+            local ref="$1"
+            local package_json
+            package_json="$(git show "${ref}:package.json" 2>/dev/null || true)"
+            if [ -z "${package_json}" ]; then
+              echo ""
+              return
+            fi
+            printf '%s' "${package_json}" | read_package_version
+          }
+
           VERSION="$(node -p "require('./package.json').version")"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare image name
-        id: image
-        run: |
           IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY,,}"
-          echo "name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          SHOULD_BUILD="true"
+          PREVIOUS_PUSH_VERSION=""
+
+          if [ "${EVENT_NAME}" = "push" ] && [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            PREVIOUS_PUSH_VERSION="$(read_version_from_ref "${BEFORE_SHA}")"
+            if [ "${PREVIOUS_PUSH_VERSION}" = "${VERSION}" ]; then
+              SHOULD_BUILD="false"
+            fi
+          fi
+
+          {
+            echo "should_build=${SHOULD_BUILD}"
+            echo "version=${VERSION}"
+            echo "image_name=${IMAGE_NAME}"
+            echo "previous_push_version=${PREVIOUS_PUSH_VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "${SHOULD_BUILD}" != "true" ]; then
+            echo "package.json version is still ${VERSION}; skipping Docker image build."
+          fi
+
+      - name: Skip Docker build
+        if: steps.meta.outputs.should_build != 'true'
+        run: echo "No package version change detected, so no Docker image was built."
 
       - name: Set up QEMU
+        if: steps.meta.outputs.should_build == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
+        if: steps.meta.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
+        if: steps.meta.outputs.should_build == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -46,14 +88,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
+        if: steps.meta.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ steps.image.outputs.name }}:latest
-            ${{ steps.image.outputs.name }}:${{ steps.package.outputs.version }}
-            ${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ steps.meta.outputs.image_name }}:latest
+            ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image_name }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

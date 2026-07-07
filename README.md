@@ -87,7 +87,7 @@ http://localhost:3001
 
 ## 自动打包、Release 与更新
 
-项目提供 GitHub Actions 工作流：推送到 `master` 时，会自动构建 Docker 镜像并推送到 GitHub Container Registry：
+项目提供 GitHub Actions 工作流：推送到 `master` 时，只有 `package.json` 中的 `version` 相对上一次推送发生变化，才会自动构建 Docker 镜像并推送到 GitHub Container Registry：
 
 ```text
 ghcr.io/jenkinwoo/cloud-manager
@@ -99,7 +99,7 @@ ghcr.io/jenkinwoo/cloud-manager
 - `package.json` 中的版本号，例如 `1.3.1`
 - 当前提交 SHA
 
-同时，`Release` 工作流会读取根目录 `package.json` 的版本号。只有当本次推送相对上一次推送修改了 `package.json` 中的 `version` 时，才会自动创建或更新对应的 GitHub Release，例如 `v1.3.3`。Release 页面会保存以下资源：
+同时，`Release` 工作流也遵循同一条规则：只有当本次推送相对上一次推送修改了 `package.json` 中的 `version` 时，才会自动创建或更新对应的 GitHub Release，例如 `v1.3.3`。Release 页面会保存以下资源：
 
 - `cloud-manager-版本号.tar.gz`
 - `cloud-manager-版本号.zip`

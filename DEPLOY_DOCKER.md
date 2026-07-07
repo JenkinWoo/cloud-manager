@@ -105,7 +105,7 @@ environment:
 完整流程：
 
 1. 递增 `package.json` / `package-lock.json` 版本号并推送代码到 GitHub。
-2. GitHub Actions 构建并推送新镜像。
+2. 如果本次推送修改了 `package.json.version`，GitHub Actions 构建并推送新镜像。
 3. 如果本次推送修改了 `package.json.version`，GitHub Actions 创建 `v版本号` Release，上传 `.tar.gz` / `.zip` 资源包和 `SHA256SUMS.txt`，并生成从上一次 package 版本号变更到本次变更之间的更新日志。
 4. 应用检测到新的 `package.json` 版本号。
 5. 在左侧版本弹窗点击“立即更新并重启”。
