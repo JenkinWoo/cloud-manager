@@ -113,7 +113,8 @@ async function fetchLatestVersion() {
     headers: {
       Accept: 'application/json',
       'User-Agent': 'cloud-manager-version-check'
-    }
+    },
+    signal: AbortSignal.timeout(15000)
   })
 
   if (!response.ok) {
@@ -177,7 +178,7 @@ router.post('/update', async (req, res) => {
 
     res.json({
       success: true,
-      status: 'started',
+      status: updateScript ? 'started' : 'watching',
       current: currentPackage.version,
       latest: latest.version
     })
