@@ -104,11 +104,12 @@ environment:
 
 完整流程：
 
-1. 推送代码到 GitHub。
+1. 递增 `package.json` / `package-lock.json` 版本号并推送代码到 GitHub。
 2. GitHub Actions 构建并推送新镜像。
-3. 应用检测到新的 `package.json` 版本号。
-4. 在左侧版本弹窗点击“立即更新并重启”。
-5. Watchtower 拉取最新镜像并重启 `cloud-manager` 容器。
+3. GitHub Actions 创建 `v版本号` Release，上传 `.tar.gz` / `.zip` 资源包和 `SHA256SUMS.txt`，并生成本次更新日志。
+4. 应用检测到新的 `package.json` 版本号。
+5. 在左侧版本弹窗点击“立即更新并重启”。
+6. Watchtower 拉取最新镜像并重启 `cloud-manager` 容器。
 
 Watchtower 的 HTTP API 没有映射到宿主机端口，只供 Compose 内部网络中的应用容器调用。
 

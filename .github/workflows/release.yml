@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: Build frontend
+        run: npm --prefix frontend run build
+
+      - name: Prepare release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+          CURRENT_SHA="$(git rev-parse HEAD)"
+          IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY,,}"
+          EXISTING_TAG_SHA="$(git rev-list -n 1 "${TAG}" 2>/dev/null || true)"
+
+          if [ -n "${EXISTING_TAG_SHA}" ] && [ "${EXISTING_TAG_SHA}" != "${CURRENT_SHA}" ]; then
+            echo "::error::Release tag ${TAG} already exists on ${EXISTING_TAG_SHA}. Bump package.json version before publishing a new update."
+            exit 1
+          fi
+
+          PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)"
+
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "image_name=${IMAGE_NAME}"
+            echo "previous_tag=${PREVIOUS_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.meta.outputs.version }}"
+          STAGE_ROOT="release"
+          STAGE_DIR="${STAGE_ROOT}/cloud-manager-${VERSION}"
+          ASSET_DIR="release-assets"
+
+          rm -rf "${STAGE_ROOT}" "${ASSET_DIR}"
+          mkdir -p "${STAGE_DIR}/frontend" "${ASSET_DIR}"
+
+          cp package.json package-lock.json README.md DEPLOY_DOCKER.md Dockerfile docker-compose.yml "${STAGE_DIR}/"
+          cp -R backend "${STAGE_DIR}/backend"
+          cp -R docs "${STAGE_DIR}/docs"
+          cp -R scripts "${STAGE_DIR}/scripts"
+          cp -R frontend/dist "${STAGE_DIR}/frontend/dist"
+          cp frontend/package*.json "${STAGE_DIR}/frontend/"
+
+          rm -rf "${STAGE_DIR}/backend/data"
+          find "${STAGE_DIR}/scripts" -name "*.sh" -exec chmod +x {} \;
+
+          tar -czf "${ASSET_DIR}/cloud-manager-${VERSION}.tar.gz" -C "${STAGE_ROOT}" "cloud-manager-${VERSION}"
+          (cd "${STAGE_ROOT}" && zip -qr "../${ASSET_DIR}/cloud-manager-${VERSION}.zip" "cloud-manager-${VERSION}")
+          (cd "${ASSET_DIR}" && sha256sum * > SHA256SUMS.txt)
+
+          ls -lh "${ASSET_DIR}"
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.meta.outputs.version }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+          IMAGE_NAME="${{ steps.meta.outputs.image_name }}"
+          PREVIOUS_TAG="${{ steps.meta.outputs.previous_tag }}"
+
+          {
+            echo "## 更新日志"
+            echo
+            if [ -n "${PREVIOUS_TAG}" ]; then
+              echo "从 ${PREVIOUS_TAG} 到 ${TAG}:"
+              git log --no-merges --pretty=format:'- %s (%h)' "${PREVIOUS_TAG}..HEAD"
+            else
+              echo "最近提交:"
+              git log --no-merges --pretty=format:'- %s (%h)' --max-count=50
+            fi
+            echo
+            echo
+            echo "## 发布资源"
+            echo
+            echo "- cloud-manager-${VERSION}.tar.gz: 源码部署包，包含后端、已构建前端、部署脚本和文档。"
+            echo "- cloud-manager-${VERSION}.zip: 与 tar.gz 内容一致，方便 Windows 环境下载解压。"
+            echo "- SHA256SUMS.txt: 发布资源校验值。"
+            echo
+            echo "## Docker 镜像"
+            echo
+            echo "- ${IMAGE_NAME}:latest"
+            echo "- ${IMAGE_NAME}:${VERSION}"
+            echo "- ${IMAGE_NAME}:${GITHUB_SHA}"
+          } > release-notes.md
+
+          cat release-notes.md
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.meta.outputs.tag }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" \
+              --title "cloud-manager ${TAG}" \
+              --notes-file release-notes.md
+          else
+            gh release create "${TAG}" \
+              --target "${GITHUB_SHA}" \
+              --title "cloud-manager ${TAG}" \
+              --notes-file release-notes.md
+          fi
+
+          gh release upload "${TAG}" release-assets/* --clobber

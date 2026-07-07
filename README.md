@@ -85,9 +85,9 @@ docker compose up -d
 http://localhost:3001
 ```
 
-## 自动打包与更新
+## 自动打包、Release 与更新
 
-项目提供 GitHub Actions 工作流：推送到 `master` 或推送 `v*` 标签时，会自动构建 Docker 镜像并推送到 GitHub Container Registry：
+项目提供 GitHub Actions 工作流：推送到 `master` 时，会自动构建 Docker 镜像并推送到 GitHub Container Registry：
 
 ```text
 ghcr.io/jenkinwoo/cloud-manager
@@ -98,6 +98,14 @@ ghcr.io/jenkinwoo/cloud-manager
 - `latest`
 - `package.json` 中的版本号，例如 `1.3.1`
 - 当前提交 SHA
+
+同时，`Release` 工作流会读取根目录 `package.json` 的版本号，自动创建或更新对应的 GitHub Release，例如 `v1.3.3`。Release 页面会保存以下资源：
+
+- `cloud-manager-版本号.tar.gz`
+- `cloud-manager-版本号.zip`
+- `SHA256SUMS.txt`
+
+Release notes 会自动写入本次版本相对上一个 `v*` 标签的提交日志、发布资源说明和 Docker 镜像标签。每次发布新更新前，请先递增 `package.json` 与 `package-lock.json` 中的版本号；如果同一个版本号已经发布过，新工作流会失败并提示需要 bump version，避免多个更新共用同一份日志。
 
 应用左侧菜单会显示当前版本号，并通过后端 `/api/version` 检查 GitHub 上 `package.json` 的最新版本。发现新版本后，版本弹窗会显示最新版本号、GitHub 发布页入口，以及“立即更新并重启”按钮。
 
@@ -117,14 +125,15 @@ docker compose up -d
 
 自动更新流程：
 
-1. 推送代码到 `master`。
+1. 修改 `package.json` / `package-lock.json` 版本号并推送到 `master`。
 2. GitHub Actions 构建并推送 `ghcr.io/jenkinwoo/cloud-manager:latest`。
-3. 应用通过 `/api/version` 检查 GitHub 上的最新版本号。
-4. 发现新版本后，左侧版本弹窗提示更新。
-5. 点击“立即更新并重启”。
-6. 后端调用 Watchtower，拉取最新镜像并重启容器。
-7. 容器重启后运行新版本。
-8. 前端约 30 秒后自动刷新页面。
+3. GitHub Actions 创建 `v版本号` Release，上传资源包并生成更新日志。
+4. 应用通过 `/api/version` 检查 GitHub 上的最新版本号。
+5. 发现新版本后，左侧版本弹窗提示更新。
+6. 点击“立即更新并重启”。
+7. 后端调用 Watchtower，拉取最新镜像并重启容器。
+8. 容器重启后运行新版本。
+9. 前端约 30 秒后自动刷新页面。
 
 如果你不是 Docker 部署，而是直接用 Node/PM2/systemd 运行源码，可以改用固定脚本模式：复制 `scripts/update-and-restart.example.sh` 为 `scripts/update-and-restart.sh`，修改最后的重启命令，并配置 `APP_UPDATE_SCRIPT="scripts/update-and-restart.sh"`。
 
