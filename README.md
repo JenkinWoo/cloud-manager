@@ -99,13 +99,13 @@ ghcr.io/jenkinwoo/cloud-manager
 - `package.json` 中的版本号，例如 `1.3.1`
 - 当前提交 SHA
 
-同时，`Release` 工作流会读取根目录 `package.json` 的版本号，自动创建或更新对应的 GitHub Release，例如 `v1.3.3`。Release 页面会保存以下资源：
+同时，`Release` 工作流会读取根目录 `package.json` 的版本号。只有当本次推送相对上一次推送修改了 `package.json` 中的 `version` 时，才会自动创建或更新对应的 GitHub Release，例如 `v1.3.3`。Release 页面会保存以下资源：
 
 - `cloud-manager-版本号.tar.gz`
 - `cloud-manager-版本号.zip`
 - `SHA256SUMS.txt`
 
-Release notes 会自动写入本次版本相对上一个 `v*` 标签的提交日志、发布资源说明和 Docker 镜像标签。每次发布新更新前，请先递增 `package.json` 与 `package-lock.json` 中的版本号；如果同一个版本号已经发布过，新工作流会失败并提示需要 bump version，避免多个更新共用同一份日志。
+Release notes 会自动写入上一次 package 版本号变更到本次 package 版本号变更之间的提交日志、发布资源说明和 Docker 镜像标签。未修改 `version` 的普通提交会跳过 Release；每次发布新更新前，请先递增 `package.json` 与 `package-lock.json` 中的版本号。如果同一个版本号已经发布过，新工作流会失败并提示需要 bump version，避免多个更新共用同一份日志。
 
 应用左侧菜单会显示当前版本号，并通过后端 `/api/version` 检查 GitHub 上 `package.json` 的最新版本。发现新版本后，版本弹窗会显示最新版本号、GitHub 发布页入口，以及“立即更新并重启”按钮。
 

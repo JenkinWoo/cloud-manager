@@ -19,7 +19,106 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Prepare release metadata
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          read_package_version() {
+            node -e "let input=''; process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => { try { console.log(JSON.parse(input).version || '') } catch { console.log('') } })"
+          }
+
+          read_version_from_ref() {
+            local ref="$1"
+            local package_json
+            package_json="$(git show "${ref}:package.json" 2>/dev/null || true)"
+            if [ -z "${package_json}" ]; then
+              echo ""
+              return
+            fi
+            printf '%s' "${package_json}" | read_package_version
+          }
+
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+          CURRENT_SHA="$(git rev-parse HEAD)"
+          IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY,,}"
+          SHOULD_RELEASE="true"
+          PREVIOUS_PUSH_VERSION=""
+
+          if [ "${EVENT_NAME}" = "push" ] && [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            PREVIOUS_PUSH_VERSION="$(read_version_from_ref "${BEFORE_SHA}")"
+            if [ "${PREVIOUS_PUSH_VERSION}" = "${VERSION}" ]; then
+              SHOULD_RELEASE="false"
+            fi
+          fi
+
+          EXISTING_TAG_SHA="$(git rev-list -n 1 "${TAG}" 2>/dev/null || true)"
+          if [ "${SHOULD_RELEASE}" = "true" ] && [ -n "${EXISTING_TAG_SHA}" ] && [ "${EXISTING_TAG_SHA}" != "${CURRENT_SHA}" ]; then
+            echo "::error::Release tag ${TAG} already exists on ${EXISTING_TAG_SHA}. Bump package.json version before publishing a new update."
+            exit 1
+          fi
+
+          PREVIOUS_VERSION=""
+          PREVIOUS_VERSION_COMMIT=""
+
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            while IFS= read -r commit; do
+              COMMIT_VERSION="$(read_version_from_ref "${commit}")"
+              if [ -z "${COMMIT_VERSION}" ]; then
+                continue
+              fi
+
+              if [ -z "${PREVIOUS_VERSION}" ]; then
+                if [ "${COMMIT_VERSION}" != "${VERSION}" ]; then
+                  PREVIOUS_VERSION="${COMMIT_VERSION}"
+                  PREVIOUS_VERSION_COMMIT="${commit}"
+                fi
+                continue
+              fi
+
+              if [ "${COMMIT_VERSION}" = "${PREVIOUS_VERSION}" ]; then
+                PREVIOUS_VERSION_COMMIT="${commit}"
+              else
+                break
+              fi
+            done < <(git rev-list HEAD^ -- package.json)
+          fi
+
+          RANGE_START=""
+          if [ -n "${PREVIOUS_VERSION}" ]; then
+            PREVIOUS_TAG="v${PREVIOUS_VERSION}"
+            if git rev-parse --verify "${PREVIOUS_TAG}" >/dev/null 2>&1; then
+              RANGE_START="${PREVIOUS_TAG}"
+            else
+              RANGE_START="${PREVIOUS_VERSION_COMMIT}"
+            fi
+          fi
+
+          {
+            echo "should_release=${SHOULD_RELEASE}"
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "image_name=${IMAGE_NAME}"
+            echo "previous_push_version=${PREVIOUS_PUSH_VERSION}"
+            echo "previous_version=${PREVIOUS_VERSION}"
+            echo "range_start=${RANGE_START}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "${SHOULD_RELEASE}" != "true" ]; then
+            echo "package.json version is still ${VERSION}; skipping GitHub Release."
+          fi
+
+      - name: Skip release
+        if: steps.meta.outputs.should_release != 'true'
+        run: echo "No package version change detected, so no Release assets or notes were generated."
+
       - name: Setup Node.js
+        if: steps.meta.outputs.should_release == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -27,38 +126,15 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
+        if: steps.meta.outputs.should_release == 'true'
         run: npm --prefix frontend ci
 
       - name: Build frontend
+        if: steps.meta.outputs.should_release == 'true'
         run: npm --prefix frontend run build
 
-      - name: Prepare release metadata
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          VERSION="$(node -p "require('./package.json').version")"
-          TAG="v${VERSION}"
-          CURRENT_SHA="$(git rev-parse HEAD)"
-          IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY,,}"
-          EXISTING_TAG_SHA="$(git rev-list -n 1 "${TAG}" 2>/dev/null || true)"
-
-          if [ -n "${EXISTING_TAG_SHA}" ] && [ "${EXISTING_TAG_SHA}" != "${CURRENT_SHA}" ]; then
-            echo "::error::Release tag ${TAG} already exists on ${EXISTING_TAG_SHA}. Bump package.json version before publishing a new update."
-            exit 1
-          fi
-
-          PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)"
-
-          {
-            echo "version=${VERSION}"
-            echo "tag=${TAG}"
-            echo "image_name=${IMAGE_NAME}"
-            echo "previous_tag=${PREVIOUS_TAG}"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Package release assets
+        if: steps.meta.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -88,6 +164,7 @@ jobs:
           ls -lh "${ASSET_DIR}"
 
       - name: Generate release notes
+        if: steps.meta.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -95,17 +172,18 @@ jobs:
           VERSION="${{ steps.meta.outputs.version }}"
           TAG="${{ steps.meta.outputs.tag }}"
           IMAGE_NAME="${{ steps.meta.outputs.image_name }}"
-          PREVIOUS_TAG="${{ steps.meta.outputs.previous_tag }}"
+          PREVIOUS_VERSION="${{ steps.meta.outputs.previous_version }}"
+          RANGE_START="${{ steps.meta.outputs.range_start }}"
 
           {
             echo "## 更新日志"
             echo
-            if [ -n "${PREVIOUS_TAG}" ]; then
-              echo "从 ${PREVIOUS_TAG} 到 ${TAG}:"
-              git log --no-merges --pretty=format:'- %s (%h)' "${PREVIOUS_TAG}..HEAD"
+            if [ -n "${RANGE_START}" ]; then
+              echo "从 v${PREVIOUS_VERSION} 到 ${TAG}:"
+              git log --no-merges --pretty=format:'- %s (%h)' "${RANGE_START}..HEAD"
             else
-              echo "最近提交:"
-              git log --no-merges --pretty=format:'- %s (%h)' --max-count=50
+              echo "未找到上一个 package 版本号变更记录，仅列出当前发布提交:"
+              git log --no-merges --pretty=format:'- %s (%h)' --max-count=1 HEAD
             fi
             echo
             echo
@@ -125,6 +203,7 @@ jobs:
           cat release-notes.md
 
       - name: Create or update GitHub Release
+        if: steps.meta.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
