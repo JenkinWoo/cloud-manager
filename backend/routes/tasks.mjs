@@ -1,5 +1,6 @@
 import { Router } from 'express'
-import { getTasks, cancelTask, sseClients } from '../queue.mjs'
+import { getTask, getTasks, cancelTask, sseClients } from '../queue.mjs'
+import { getStoredCreationCredentials, serializeTask } from '../utils/taskCredentials.mjs'
 
 const router = Router()
 
@@ -10,12 +11,24 @@ router.get('/', (req, res) => {
   res.json(tasks)
 })
 
+router.get('/:id/credentials', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  const task = getTask(req.params.id)
+  if (!task) return res.status(404).json({ error: '任务不存在' })
+  if (task.type !== 'cloud:createInstance') return res.status(400).json({ error: '该任务不是实例创建任务' })
+  if (task.status !== 'done') return res.status(409).json({ error: '实例创建成功后才可查看创建密码' })
+  const credentials = getStoredCreationCredentials(task)
+  if (!credentials) return res.status(404).json({ error: '该任务未保存创建密码，无法补回历史密码' })
+  res.json({ taskId: task.id, instanceId: task.result?.instanceId || null,
+    createdAt: task.createdAt, ...credentials })
+})
+
 // DELETE /api/tasks/:id - 取消任务
 router.delete('/:id', async (req, res) => {
   try {
     const task = await cancelTask(req.params.id)
     if (!task) return res.status(404).json({ error: '任务不存在' })
-    res.json(task)
+    res.json(serializeTask(task))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

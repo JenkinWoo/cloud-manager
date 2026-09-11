@@ -232,7 +232,7 @@ export function getOperationLogs(filter = {}) {
     const keyword = String(filter.keyword).trim().toLowerCase()
     if (keyword) {
       logs = logs.filter((item) =>
-        [item.operator, item.action, item.resource, item.target, item.path, item.error]
+        [item.id, item.operator, item.action, item.resource, item.target, item.method, item.path, item.ip, item.error]
           .some((value) => String(value || '').toLowerCase().includes(keyword))
       )
     }
@@ -240,6 +240,11 @@ export function getOperationLogs(filter = {}) {
 
   const limit = Math.min(Math.max(Number(filter.limit) || 200, 1), 500)
   return logs.slice().reverse().slice(0, limit)
+}
+
+export function getOperationLog(id) {
+  const log = (operationLogsDb.data.logs || []).find((item) => item.id === id)
+  return log ? normalizeLogForResponse(log) : null
 }
 
 export function appendOperationLog(entry) {

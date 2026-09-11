@@ -229,12 +229,9 @@
               <input v-model.number="createForm.memoryGb" type="number" min="1" class="form-control" />
             </div>
           </div>
-          <div class="form-group">
-            <label>root 密码</label>
-            <input v-model="createForm.rootPassword" type="password" class="form-control"
-              placeholder="请输入 Oracle root 密码" />
-            <small class="form-hint">8-100 位，至少包含大小写、数字和特殊字符。</small>
-          </div>
+          <InstancePasswordInput v-model="createForm.rootPassword" :account-id="selectedAccountId"
+            input-id="oracle-create-password" label="root 密码" :disabled="creating"
+            @generating="generatingPassword = $event" />
           <div class="form-group">
             <label>重试间隔 (秒)</label>
             <input v-model.number="createForm.delay" type="number" min="10" max="300" class="form-control" />
@@ -250,6 +247,9 @@
             <label>AMI ID</label>
             <input v-model="createForm.imageId" class="form-control" placeholder="留空则自动选择默认镜像" />
           </div>
+          <InstancePasswordInput v-model="createForm.rootPassword" :account-id="selectedAccountId"
+            input-id="aws-create-password" label="ec2-user 密码" :disabled="creating"
+            @generating="generatingPassword = $event" />
         </template>
 
         <template v-else-if="selectedAccount?.computeProvider === 'azure'">
@@ -291,11 +291,11 @@
               <label>Admin Username</label>
               <input v-model="createForm.adminUsername" class="form-control" placeholder="azureuser" />
             </div>
-            <div class="form-group">
-              <label>Admin Password</label>
-              <input v-model="createForm.adminPassword" type="password" class="form-control" />
-            </div>
           </div>
+          <InstancePasswordInput v-model="createForm.adminPassword" :account-id="selectedAccountId"
+            input-id="azure-create-password" label="管理员密码" :disabled="creating"
+            rule="12–72 位，至少包含大小写字母、数字、特殊字符中的三类。"
+            @generating="generatingPassword = $event" />
           <div class="form-hint">
             默认镜像使用 Ubuntu 22.04 LTS Gen2，资源组和网络会按当前框架自动创建并复用。
           </div>
@@ -303,7 +303,7 @@
 
         <div class="modal-footer">
           <button class="btn btn-ghost" @click="closeCreate">取消</button>
-          <button class="btn btn-primary" :disabled="creating" @click="submitCreate">
+          <button class="btn btn-primary" :disabled="creating || generatingPassword" @click="submitCreate">
             {{ creating ? '提交中...' : '加入任务队列' }}
           </button>
         </div>
@@ -452,6 +452,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { accountsApi, cloudApi } from '../api/index.js'
+import InstancePasswordInput from '../components/InstancePasswordInput.vue'
 
 const accounts = ref([])
 const dnsAccounts = ref([])
@@ -478,6 +479,7 @@ const showVolumeSizeModal = ref(false)
 const selectedInstance = ref(null)
 const selectedVolume = ref(null)
 const creating = ref(false)
+const generatingPassword = ref(false)
 const switchingIp = ref(false)
 const modifyingShape = ref(false)
 const settingUpNetwork = ref(false)
@@ -960,7 +962,8 @@ async function openCreate() {
   } else if (selectedAccount.value.computeProvider === 'aws') {
     createForm.value = {
       instanceType: 't2.micro',
-      imageId: ''
+      imageId: '',
+      rootPassword: ''
     }
   } else {
     if (!azureSubscriptionId.value) {
@@ -984,11 +987,14 @@ async function openCreate() {
 
 function closeCreate() {
   showCreateModal.value = false
+  createForm.value = {}
+  generatingPassword.value = false
 }
 
 async function submitCreate() {
-  if (selectedAccount.value?.computeProvider === 'oracle') {
-    const passwordError = validateOraclePassword(createForm.value.rootPassword)
+  if (creating.value || generatingPassword.value) return
+  if (['oracle', 'aws'].includes(selectedAccount.value?.computeProvider)) {
+    const passwordError = validateLinuxPassword(createForm.value.rootPassword, selectedAccount.value.computeProvider)
     if (passwordError) {
       toast(passwordError, 'error')
       return
@@ -1375,17 +1381,18 @@ function shortText(text, length = 18) {
   return `${text.slice(0, length)}...`
 }
 
-function validateOraclePassword(password) {
+function validateLinuxPassword(password, provider) {
+  const label = providerLabel(provider)
   const allowedSpecials = /[!#$%&'()*+,\-./:;<=>?@[\\\]^_{|}~]/
   const invalidChars = /[^A-Za-z\d!#$%&'()*+,\-./:;<=>?@[\\\]^_{|}~]/
 
-  if (!password) return '请输入 Oracle 实例 root 密码'
-  if (password.length < 8 || password.length > 100) return 'Oracle 实例密码长度必须在 8 到 100 位之间'
-  if (!/[a-z]/.test(password)) return 'Oracle 实例密码至少包含 1 个小写字母'
-  if (!/[A-Z]/.test(password)) return 'Oracle 实例密码至少包含 1 个大写字母'
-  if (!/\d/.test(password)) return 'Oracle 实例密码至少包含 1 个数字'
-  if (!allowedSpecials.test(password)) return 'Oracle 实例密码至少包含 1 个特殊字符'
-  if (invalidChars.test(password)) return 'Oracle 实例密码包含不支持的字符'
+  if (!password) return `请输入 ${label} 实例密码`
+  if (password.length < 8 || password.length > 100) return `${label} 实例密码长度必须在 8 到 100 位之间`
+  if (!/[a-z]/.test(password)) return `${label} 实例密码至少包含 1 个小写字母`
+  if (!/[A-Z]/.test(password)) return `${label} 实例密码至少包含 1 个大写字母`
+  if (!/\d/.test(password)) return `${label} 实例密码至少包含 1 个数字`
+  if (!allowedSpecials.test(password)) return `${label} 实例密码至少包含 1 个特殊字符`
+  if (invalidChars.test(password)) return `${label} 实例密码包含不支持的字符`
   return ''
 }
 </script>

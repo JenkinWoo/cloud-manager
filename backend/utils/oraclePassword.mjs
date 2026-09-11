@@ -7,7 +7,7 @@ function escapeForCharClass(value) {
 }
 
 export function validateOracleInstancePassword(password) {
-  if (!password) {
+  if (typeof password !== 'string' || !password) {
     throw new Error('Oracle 实例密码不能为空')
   }
 

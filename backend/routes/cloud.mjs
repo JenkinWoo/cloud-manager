@@ -4,6 +4,7 @@ import { getComputeProvider, getDnsProvider } from '../providers/registry.mjs'
 import { createTask } from '../queue.mjs'
 import { getCurrentMonthPeriod, syncTrafficUsage } from '../services/trafficUsage.mjs'
 import { validateOracleInstancePassword } from '../utils/oraclePassword.mjs'
+import { generateInstancePassword, validateAwsInstancePassword } from '../utils/instancePassword.mjs'
 
 const router = Router({ mergeParams: true })
 const READ_TIMEOUT_MS = Number(process.env.CLOUD_READ_TIMEOUT_MS || 8000)
@@ -193,6 +194,19 @@ router.get('/azure/vm-sizes', async (req, res) => {
   }
 })
 
+router.get('/instance-password', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  try {
+    const account = requireAccount(req.params.accountId)
+    if (!['oracle', 'aws', 'azure'].includes(account.computeProvider)) {
+      return res.status(400).json({ error: '该平台暂不支持生成实例密码' })
+    }
+    res.json({ password: generateInstancePassword() })
+  } catch (error) {
+    res.status(400).json({ error: error.message })
+  }
+})
+
 router.post('/instances', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
@@ -200,6 +214,10 @@ router.post('/instances', async (req, res) => {
 
     if (account.computeProvider === 'oracle') {
       validateOracleInstancePassword(params.rootPassword)
+    }
+    if (account.computeProvider === 'aws') {
+      if (!params.rootPassword) params.rootPassword = generateInstancePassword()
+      validateAwsInstancePassword(params.rootPassword)
     }
     if (account.computeProvider === 'azure' && !params.adminPassword) {
       throw new Error('Azure 实例创建需要 adminPassword')

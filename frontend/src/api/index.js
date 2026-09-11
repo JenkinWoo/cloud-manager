@@ -64,6 +64,7 @@ export const accountsApi = {
 }
 
 export const cloudApi = {
+  generateInstancePassword: (accountId, config = {}) => api.get(`/cloud/${accountId}/instance-password`, config),
   listInstances: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/instances`, { ...config, params }),
   getInstance: (accountId, instanceId, params = {}, config = {}) =>
     api.get(`/cloud/${accountId}/instances/${instanceId}`, { ...config, params }),
@@ -106,6 +107,7 @@ export const dnsApi = {
 
 export const tasksApi = {
   list: (params) => api.get('/tasks', { params }),
+  credentials: (id, config = {}) => api.get(`/tasks/${encodeURIComponent(id)}/credentials`, config),
   cancel: (id) => api.delete(`/tasks/${id}`)
 }
 
@@ -117,6 +119,7 @@ export const settingsApi = {
 
 export const logsApi = {
   list: (params) => api.get('/logs', { params }),
+  get: (id, config = {}) => api.get(`/logs/${encodeURIComponent(id)}`, config),
   cleanup: (data) => api.post('/logs/cleanup', data)
 }
 

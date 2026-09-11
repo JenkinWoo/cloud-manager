@@ -4,6 +4,7 @@
 import { accountsDb, tasksDb } from '../db.mjs'
 import { getComputeProvider } from '../providers/registry.mjs'
 import { queueEmitter, updateTask } from '../queue.mjs'
+import { generateInstancePassword } from '../utils/instancePassword.mjs'
 
 queueEmitter.on('task:new', async (task) => {
   if (task.type !== 'cloud:createInstance') return
@@ -18,6 +19,11 @@ queueEmitter.on('task:new', async (task) => {
 })
 
 async function handleCreateInstance(task, account) {
+  // Upgrade pending legacy AWS jobs before the first attempt. Persist once so
+  // retries and process restarts use the same password shown after completion.
+  if (account.computeProvider === 'aws' && !task.params.rootPassword) {
+    await updateTask(task.id, { params: { ...task.params, provider: 'aws', rootPassword: generateInstancePassword() } })
+  }
   const { delay = 60, ...params } = task.params
   let _index = task.retries || 0
 

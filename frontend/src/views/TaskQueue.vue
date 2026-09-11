@@ -59,22 +59,29 @@
                 class="btn btn-danger btn-sm"
                 @click="cancelTask(task)"
               >取消</button>
+              <button v-if="task.type === 'cloud:createInstance' && task.status === 'done' && task.hasCreationPassword"
+                class="btn btn-ghost btn-sm" @click="credentialTask = task">查看创建密码</button>
+              <span v-else-if="task.type === 'cloud:createInstance' && task.status === 'done'" class="form-hint">未记录创建密码</span>
             </td>
           </tr>
         </tbody>
       </table>
     </div>
+    <TaskCredentialsDialog v-if="credentialTask" :key="credentialTask.id" :task-id="credentialTask.id"
+      :account-name="accountName(credentialTask.accountId)" @close="credentialTask = null" />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { tasksApi, accountsApi, getAuthToken } from '../api/index.js'
+import TaskCredentialsDialog from '../components/TaskCredentialsDialog.vue'
 
 const tasks = ref([])
 const accounts = ref([])
 const filterStatus = ref('')
 const connected = ref(false)
+const credentialTask = ref(null)
 let sseSource = null
 let reconnectTimer = null
 

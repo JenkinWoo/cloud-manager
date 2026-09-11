@@ -10,6 +10,7 @@
 - Oracle / AWS 实例创建
 - DNS 记录管理
 - 任务队列
+- 系统日志筛选、按 ID 查询详情及复制日志
 - Telegram 通知
 - Docker 部署
 
@@ -24,6 +25,18 @@
 ```text
 backend/    后端服务与数据
 frontend/   前端项目
+```
+
+## 系统日志详情
+
+在“系统日志”页面点击“查看详情”，可查询该记录的完整错误信息、请求方法与路径、HTTP 状态码、耗时、来源地址、客户端及关联信息，并复制为 JSON。搜索框支持日志 ID 和来源地址。历史日志仅展示当时已保存的字段；已清理的记录会提示不存在。
+
+登录后可调用 `GET /api/logs/:id` 查询单条日志；不存在时返回 HTTP 404。查询详情不会新增操作日志。
+
+日志接口的隔离测试（Node.js 22，使用内存模拟数据，不读取或修改实际账户和日志）：
+
+```bash
+node --experimental-test-module-mocks --test tests/operationLog.test.mjs
 ```
 
 ## API Key 获取指南

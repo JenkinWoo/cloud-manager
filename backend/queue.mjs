@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import { tasksDb } from './db.mjs'
+import { serializeTask } from './utils/taskCredentials.mjs'
 
 export const queueEmitter = new EventEmitter()
 queueEmitter.setMaxListeners(100)
@@ -23,7 +24,7 @@ export async function createTask(type, accountId, params = {}) {
     id: uuidv4(),
     type,
     accountId,
-    params,
+    params: structuredClone(params),
     status: 'pending',
     result: null,
     error: null,
@@ -35,7 +36,7 @@ export async function createTask(type, accountId, params = {}) {
   tasksDb.data.tasks.push(task)
   await tasksDb.write()
 
-  broadcast({ event: 'task:created', task })
+  broadcast({ event: 'task:created', task: serializeTask(task) })
   queueEmitter.emit('task:new', task)
   return task
 }
@@ -59,7 +60,7 @@ export async function updateTask(id, updates) {
   const previousStatus = task.status
   Object.assign(task, updates, { updatedAt: new Date().toISOString() })
   await tasksDb.write()
-  broadcast({ event: 'task:updated', task })
+  broadcast({ event: 'task:updated', task: serializeTask(task) })
 
   if (task.status !== previousStatus && ['done', 'cancelled'].includes(task.status)) {
     queueEmitter.emit('task:finalized', { task, previousStatus })
@@ -73,7 +74,11 @@ export function getTasks(filter = {}) {
   if (filter.status) tasks = tasks.filter(task => task.status === filter.status)
   if (filter.accountId) tasks = tasks.filter(task => task.accountId === filter.accountId)
   if (filter.type) tasks = tasks.filter(task => task.type === filter.type)
-  return tasks.slice().reverse().slice(0, 200)
+  return tasks.slice().reverse().slice(0, 200).map(serializeTask)
+}
+
+export function getTask(id) {
+  return tasksDb.data.tasks.find((task) => task.id === id)
 }
 
 export async function cancelTask(id) {

@@ -17,6 +17,7 @@ import {
   UnassignIpv6AddressesCommand
 } from '@aws-sdk/client-ec2'
 import BaseComputeProvider from './BaseComputeProvider.mjs'
+import { validateAwsInstancePassword } from '../../utils/instancePassword.mjs'
 
 let awsSdkPromise = null
 
@@ -61,7 +62,8 @@ export default class AwsProvider extends BaseComputeProvider {
   }
 
   async createInstance(params) {
-    const { instanceType = 't2.micro', imageId, rootPassword = 'Admin@123@q' } = params
+    const { instanceType = 't2.micro', imageId, rootPassword } = params
+    validateAwsInstancePassword(rootPassword)
 
     let finalImageId = imageId
     if (!finalImageId) {
@@ -78,7 +80,8 @@ export default class AwsProvider extends BaseComputeProvider {
       finalImageId = sorted[0].ImageId
     }
 
-    const userDataScript = `#!/bin/bash\necho "ec2-user:${rootPassword}" | chpasswd\nsed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config\nsystemctl restart sshd`
+    const encodedPassword = Buffer.from(`ec2-user:${rootPassword}\n`).toString('base64')
+    const userDataScript = `#!/bin/bash\nprintf '%s' '${encodedPassword}' | base64 --decode | chpasswd\nsed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config\nsystemctl restart sshd`
 
     const res = await this.client.send(new RunInstancesCommand({
       ImageId: finalImageId,
