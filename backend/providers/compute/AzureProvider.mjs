@@ -4,6 +4,9 @@ import { normalizeAzureCredentials } from '../../utils/azureCredentials.mjs'
 
 let azureSdkPromise = null
 const AZURE_MONITOR_METRICS_API_VERSION = '2018-01-01'
+// https://azure.microsoft.com/en-us/free/ — free allowance SKUs, not billing entitlement.
+// B2pts_v2 uses Arm and is incompatible with the default Ubuntu x64 image.
+const AZURE_FREE_TIER_X64_VM_SIZES = new Set(['Standard_B1s', 'Standard_B2ats_v2'])
 
 function safeName(input, fallback = 'cloud-manager') {
   const cleaned = String(input || '')
@@ -248,12 +251,37 @@ export default class AzureProvider extends BaseComputeProvider {
     }
   }
 
+  async _getAllowedLocations(subscriptionId) {
+    let assignment
+    try {
+      assignment = await this._armGet(
+        `/subscriptions/${subscriptionId}/providers/Microsoft.Authorization/policyAssignments/sys.regionrestriction`,
+        '2022-06-01'
+      )
+    } catch (error) {
+      // A subscription without this assignment has no sys.regionrestriction filter.
+      if (error.response?.status === 404) return null
+      throw error
+    }
+
+    const allowedLocations = assignment?.properties?.parameters?.listOfAllowedLocations?.value
+    if (!Array.isArray(allowedLocations) || allowedLocations.some((name) => typeof name !== 'string')) {
+      throw new Error('Azure 区域限制策略 sys.regionrestriction 缺少有效的 listOfAllowedLocations 参数')
+    }
+
+    return new Set(allowedLocations.map((name) => name.trim().toLowerCase()))
+  }
+
   async listLocations(subscriptionId) {
     const subscription = await this._resolveSubscription(subscriptionId)
-    const response = await this._armGet(`/subscriptions/${subscription.subscriptionId}/locations`, '2022-12-01')
+    const [response, allowedLocations] = await Promise.all([
+      this._armGet(`/subscriptions/${subscription.subscriptionId}/locations`, '2022-12-01'),
+      this._getAllowedLocations(subscription.subscriptionId)
+    ])
     const locations = Array.isArray(response?.value) ? response.value : []
 
     return locations
+      .filter((item) => allowedLocations === null || allowedLocations.has(String(item.name).toLowerCase()))
       .map((item) => ({
         name: item.name,
         displayName: item.displayName || item.name,
@@ -275,6 +303,8 @@ export default class AzureProvider extends BaseComputeProvider {
     const sizes = []
 
     for await (const item of client.virtualMachineSizes.list(location)) {
+      if (!AZURE_FREE_TIER_X64_VM_SIZES.has(item.name)) continue
+
       sizes.push({
         name: item.name,
         numberOfCores: item.numberOfCores,

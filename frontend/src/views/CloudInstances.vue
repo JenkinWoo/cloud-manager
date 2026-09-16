@@ -274,11 +274,11 @@
               </select>
             </div>
             <div class="form-group">
-              <label>VM Size</label>
+              <label>VM Size（免费额度适用）</label>
               <select v-model="createForm.vmSize" class="form-control"
                 :disabled="loadingAzureVmSizes || !createForm.location">
                 <option value="" disabled>
-                  {{ loadingAzureVmSizes ? '正在加载 VM Size...' : '请选择 VM Size' }}
+                  {{ loadingAzureVmSizes ? '正在加载 VM Size...' : (createForm.location && !azureVmSizes.length ? '当前区域无免费额度适用的规格' : '请选择 VM Size') }}
                 </option>
                 <option v-for="size in azureVmSizes" :key="size.name" :value="size.name">
                   {{ size.label || size.name }}
@@ -298,6 +298,7 @@
             @generating="generatingPassword = $event" />
           <div class="form-hint">
             默认镜像使用 Ubuntu 22.04 LTS Gen2，资源组和网络会按当前框架自动创建并复用。
+            仅列出免费额度适用的 x64 规格；实际是否免费取决于订阅权益有效期及剩余额度，磁盘和公网 IP 等资源单独计费。
           </div>
         </template>
 
@@ -671,7 +672,7 @@ function pickDefaultLocation(locations = []) {
 }
 
 function pickDefaultVmSize(sizes = []) {
-  const preferred = ['Standard_B1s', 'Standard_B2s', 'Standard_A1_v2']
+  const preferred = ['Standard_B1s', 'Standard_B2ats_v2']
   const matched = preferred.find((name) => sizes.some((item) => item.name === name))
   return matched || sizes[0]?.name || ''
 }
