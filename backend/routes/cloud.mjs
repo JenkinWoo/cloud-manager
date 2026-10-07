@@ -163,6 +163,20 @@ router.get('/azure/subscriptions', async (req, res) => {
   }
 })
 
+router.get('/azure/subscription-billing', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  try {
+    const account = requireAccount(req.params.accountId)
+    if (account.computeProvider !== 'azure') return res.status(400).json({ error: '当前账户不是 Azure 账户' })
+    if (typeof req.query.subscriptionId !== 'string' || !req.query.subscriptionId.trim()) {
+      return res.status(400).json({ error: 'subscriptionId 为必填项' })
+    }
+    res.json(await getComputeProvider(account).getSubscriptionBilling(req.query.subscriptionId.trim()))
+  } catch (error) {
+    res.status(error.statusCode === 400 ? 400 : 500).json({ error: error.message })
+  }
+})
+
 router.get('/azure/locations', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
@@ -174,6 +188,20 @@ router.get('/azure/locations', async (req, res) => {
     res.json(await provider.listLocations(req.query.subscriptionId))
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/azure/create-options', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  try {
+    const account = requireAccount(req.params.accountId)
+    if (account.computeProvider !== 'azure') return res.status(400).json({ error: '当前账户不是 Azure 账户' })
+    if (typeof req.query.subscriptionId !== 'string' || !req.query.subscriptionId.trim()) {
+      return res.status(400).json({ error: 'subscriptionId 为必填项' })
+    }
+    res.json(await getComputeProvider(account).listCreateOptions(req.query.subscriptionId.trim()))
+  } catch (error) {
+    res.status(error.statusCode === 400 ? 400 : 500).json({ error: error.message })
   }
 })
 
@@ -312,6 +340,51 @@ router.post('/instances/:instanceId/add-ipv6', async (req, res) => {
   }
 })
 
+router.get('/public-ips', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    const provider = getScopedProvider(account, req)
+    if (!(provider.constructor.capabilities || []).includes('manage_public_ips')) {
+      return res.status(400).json({ error: '当前账户不支持管理公网 IP' })
+    }
+    res.json(await withTimeout(provider.listPublicIps(), TRAFFIC_TIMEOUT_MS, '公网 IP 列表请求超时，请重试'))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/public-ips/:publicIpId/detach-and-delete', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    const provider = getScopedProvider(account, req)
+    setOperationLogTarget(req, { accountName: account.name, targetName: req.params.publicIpId.split('/').at(-1) })
+    if (!(provider.constructor.capabilities || []).includes('manage_public_ips')) {
+      return res.status(400).json({ error: '当前账户不支持管理公网 IP' })
+    }
+    const result = await provider.deletePublicIp(req.params.publicIpId, { detachUnusedNic: true })
+    setOperationLogTarget(req, { targetName: result.name, publicIpAddress: result.ipAddress, detachedNicId: result.detachedNicId })
+    res.json({ success: true, ...result })
+  } catch (err) {
+    res.status([400, 403, 404, 409, 412].includes(err.statusCode) ? err.statusCode : 500).json({ error: err.message })
+  }
+})
+
+router.delete('/public-ips/:publicIpId', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    const provider = getScopedProvider(account, req)
+    setOperationLogTarget(req, { accountName: account.name, targetName: req.params.publicIpId.split('/').at(-1) })
+    if (!(provider.constructor.capabilities || []).includes('manage_public_ips')) {
+      return res.status(400).json({ error: '当前账户不支持管理公网 IP' })
+    }
+    const result = await provider.deletePublicIp(req.params.publicIpId)
+    setOperationLogTarget(req, { targetName: result.name, publicIpAddress: result.ipAddress })
+    res.json({ success: true, ...result })
+  } catch (err) {
+    res.status([400, 403, 404, 409].includes(err.statusCode) ? err.statusCode : 500).json({ error: err.message })
+  }
+})
+
 router.get('/elastic-ips', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
@@ -343,6 +416,28 @@ router.post('/elastic-ips/release-unused', async (req, res) => {
 
     const results = await provider.releaseUnusedElasticIps()
     res.json({ released: results.filter((item) => item.success).length, results })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.put('/instances/:instanceId/name', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    const provider = getScopedProvider(account, req)
+    if (!(provider.constructor.capabilities || []).includes('rename_instance')) {
+      return res.status(400).json({ error: `${account.computeProvider} 不支持修改实例名称` })
+    }
+
+    const name = req.body?.displayName
+    if (typeof name !== 'string' || !name.trim() || name.trim().length > 255 || /[\u0000-\u001f\u007f]/.test(name)) {
+      return res.status(400).json({ error: '实例名称须为 1–255 个字符，且不能包含换行或控制字符' })
+    }
+
+    await attachInstanceOperationLogTarget(req, account, provider)
+    const result = await provider.renameInstance(req.params.instanceId, name.trim())
+    setOperationLogTarget(req, { newInstanceName: result.displayName })
+    res.json({ success: true, ...result })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

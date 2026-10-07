@@ -1,5 +1,6 @@
 import {
   EC2Client,
+  CreateTagsCommand,
   DescribeInstancesCommand,
   RunInstancesCommand,
   TerminateInstancesCommand,
@@ -30,7 +31,7 @@ async function loadAwsSdk() {
 
 export default class AwsProvider extends BaseComputeProvider {
   static providerName = 'aws'
-  static capabilities = ['elastic_ip', 'switch_ip', 'switch_ipv6', 'security_groups', 'allow_all_inbound_traffic']
+  static capabilities = ['elastic_ip', 'switch_ip', 'switch_ipv6', 'security_groups', 'allow_all_inbound_traffic', 'rename_instance']
 
   constructor(account) {
     super(account)
@@ -92,6 +93,14 @@ export default class AwsProvider extends BaseComputeProvider {
 
     const ins = res.Instances[0]
     return { instanceId: ins.InstanceId, displayName: ins.InstanceId }
+  }
+
+  async renameInstance(instanceId, displayName) {
+    await this.client.send(new CreateTagsCommand({
+      Resources: [instanceId],
+      Tags: [{ Key: 'Name', Value: displayName }]
+    }))
+    return { instanceId, displayName }
   }
 
   async deleteInstance(instanceId) {

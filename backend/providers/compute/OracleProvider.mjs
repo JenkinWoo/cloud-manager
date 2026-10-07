@@ -121,6 +121,7 @@ function errorMessage(error) {
 export default class OracleProvider extends BaseComputeProvider {
   static providerName = 'oracle'
   static capabilities = [
+    'rename_instance',
     'switch_ip',
     'switch_ipv6',
     'ipv6',
@@ -819,6 +820,15 @@ export default class OracleProvider extends BaseComputeProvider {
 
     const res = await this.computeClient.launchInstance({ launchInstanceDetails: details })
     return { instanceId: res.instance.id, displayName: res.instance.displayName }
+  }
+
+  async renameInstance(instanceId, displayName) {
+    await this._ensureInitialized()
+    const res = await this.computeClient.updateInstance({
+      instanceId,
+      updateInstanceDetails: { displayName }
+    })
+    return { instanceId, displayName, requestId: res.opcRequestId }
   }
 
   async deleteInstance(instanceId) {

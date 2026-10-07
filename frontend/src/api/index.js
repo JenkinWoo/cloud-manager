@@ -64,6 +64,13 @@ export const accountsApi = {
 }
 
 export const cloudApi = {
+  listPublicIps: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/public-ips`, { ...config, params }),
+  detachAndDeletePublicIp: (accountId, publicIpId, data, logTarget) =>
+    api.post(`/cloud/${accountId}/public-ips/${encodeURIComponent(publicIpId)}/detach-and-delete`, data, logTargetConfig(logTarget)),
+  deletePublicIp: (accountId, publicIpId, params = {}, logTarget) =>
+    api.delete(`/cloud/${accountId}/public-ips/${encodeURIComponent(publicIpId)}`, logTargetConfig(logTarget, { params })),
+  renameInstance: (accountId, instanceId, data, logTarget) =>
+    api.put(`/cloud/${accountId}/instances/${encodeURIComponent(instanceId)}/name`, data, logTargetConfig(logTarget)),
   generateInstancePassword: (accountId, config = {}) => api.get(`/cloud/${accountId}/instance-password`, config),
   listInstances: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/instances`, { ...config, params }),
   getInstance: (accountId, instanceId, params = {}, config = {}) =>
@@ -93,6 +100,10 @@ export const cloudApi = {
     api.delete(`/cloud/${accountId}/volumes/${volumeId}`, logTargetConfig(logTarget, { params })),
   setupNetwork: (accountId, data = {}) => api.post(`/cloud/${accountId}/network/setup`, data),
   listAzureSubscriptions: (accountId, config = {}) => api.get(`/cloud/${accountId}/azure/subscriptions`, config),
+  getAzureSubscriptionBilling: (accountId, params = {}, config = {}) =>
+    api.get(`/cloud/${accountId}/azure/subscription-billing`, { ...config, params }),
+  listAzureCreateOptions: (accountId, params = {}, config = {}) =>
+    api.get(`/cloud/${accountId}/azure/create-options`, { ...config, params }),
   listAzureLocations: (accountId, params = {}, config = {}) =>
     api.get(`/cloud/${accountId}/azure/locations`, { ...config, params }),
   listAzureVmSizes: (accountId, params = {}, config = {}) =>

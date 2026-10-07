@@ -24,16 +24,8 @@
       <span v-else class="account-loading">当前还没有 DNS 账户</span>
     </div>
 
-    <div v-if="currentDomainName" class="card domain-card">
-      <div class="domain-title">当前主域名</div>
-      <div class="domain-name">{{ currentDomainName }}</div>
-      <div class="domain-hint">
-        记录名称只需填写前缀，例如 `www`；未填写后缀时会自动补全为 `{{ currentDomainName }}`。
-      </div>
-    </div>
-
     <div class="card" style="margin-bottom:20px">
-      <h3 class="section-heading">新增或更新记录</h3>
+      <h3 class="section-heading">{{ currentDomainName }}</h3>
       <div class="form-row">
         <div class="form-group form-grow">
           <label>记录名称</label>
@@ -131,6 +123,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { accountsApi, dnsApi } from '../api/index.js'
+import { toFullRecordName as fullRecordName, toShortRecordName as shortRecordName } from '../utils/dnsRecordName.js'
 
 const dnsAccounts = ref([])
 const selectedDnsAccountId = ref('')
@@ -189,40 +182,12 @@ const filteredRecords = computed(() => {
   })
 })
 
-function normalizeDomainName(domainName) {
-  return String(domainName || '').trim().toLowerCase().replace(/\.$/, '')
-}
-
 function toFullRecordName(input) {
-  const normalizedInput = String(input || '').trim().toLowerCase().replace(/\.$/, '')
-  if (!normalizedInput) return ''
-
-  const domainName = currentDomainName.value
-  if (!domainName) return normalizedInput
-  if (normalizedInput === '@') return domainName
-  if (normalizedInput === domainName) return domainName
-
-  const suffix = `.${domainName}`
-  if (normalizedInput.endsWith(suffix)) return normalizedInput
-  if (normalizedInput.includes('.')) {
-    throw new Error(`记录 "${normalizedInput}" 不属于主域名 ${domainName}`)
-  }
-
-  return `${normalizedInput}${suffix}`
+  return fullRecordName(input, currentDomainName.value)
 }
 
 function toShortRecordName(fullName) {
-  const normalized = normalizeDomainName(fullName)
-  const domainName = currentDomainName.value
-  if (!normalized || !domainName) return normalized
-  if (normalized === domainName) return '@'
-
-  const suffix = `.${domainName}`
-  if (normalized.endsWith(suffix)) {
-    return normalized.slice(0, -suffix.length) || '@'
-  }
-
-  return normalized
+  return shortRecordName(fullName, currentDomainName.value)
 }
 
 function normalizeEditorName() {

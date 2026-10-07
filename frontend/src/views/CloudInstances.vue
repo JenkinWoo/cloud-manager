@@ -6,6 +6,7 @@
         <p>统一管理 Oracle、AWS、Azure 等计算实例。</p>
       </div>
       <div class="header-actions">
+        <button v-if="isAzureAccount" class="btn btn-ghost" :disabled="!azureSubscriptionId" @click="showPublicIpModal = true">管理公网 IP</button>
         <button class="btn btn-ghost" :disabled="!selectedAccountId || loading" @click="refreshCurrent">刷新</button>
         <button class="btn btn-primary" :disabled="!selectedAccountId || !canCreate" @click="openCreate">新建实例</button>
       </div>
@@ -62,6 +63,7 @@
               </option>
             </select>
           </div>
+          <AzureSubscriptionBilling v-if="azureSubscriptionId" :account-id="selectedAccountId" :subscription-id="azureSubscriptionId" />
         </div>
 
         <div v-if="isAzureAccount && !azureSubscriptionId" class="card empty-state">
@@ -127,6 +129,8 @@
             <div class="divider"></div>
 
             <div class="action-row">
+              <button v-if="hasCapability('rename_instance')" class="btn btn-ghost btn-sm"
+                :disabled="renamingInstance" @click="openRename(instance)">修改名称</button>
               <button v-if="['STOPPED', 'TERMINATED'].includes(normalizeState(instance.state))"
                 class="btn btn-success btn-sm" @click="runAction(instance, 'START')">
                 启动
@@ -203,6 +207,34 @@
       </template>
     </template>
 
+    <AzurePublicIpDialog v-if="showPublicIpModal && isAzureAccount && azureSubscriptionId"
+      :key="`${selectedAccountId}:${azureSubscriptionId}`" :account-id="selectedAccountId"
+      :subscription-id="azureSubscriptionId" :account-name="selectedAccount?.name || ''"
+      :subscription-name="selectedAzureSubscription?.displayName || ''" @close="showPublicIpModal = false" />
+
+    <div v-if="renameTarget" class="modal-overlay" @click.self="closeRename">
+      <form class="modal" role="dialog" aria-modal="true" aria-labelledby="rename-title" @submit.prevent="confirmRename">
+        <div class="modal-header">
+          <h3 id="rename-title">修改实例名称</h3>
+          <button type="button" class="modal-close" :disabled="renamingInstance" aria-label="关闭" @click="closeRename">x</button>
+        </div>
+        <p class="modal-desc">实例：{{ renameTarget.instance.displayName || renameTarget.instance.id }}</p>
+        <p v-if="renameTarget.provider === 'azure'" class="modal-desc">Azure 通过标签保存此处的显示名称，资源名称和主机名保持不变。</p>
+        <div class="form-group">
+          <label for="instance-display-name">实例名称</label>
+          <input id="instance-display-name" v-model="renameName" class="form-control" required maxlength="255"
+            :disabled="renamingInstance" autocomplete="off" />
+        </div>
+        <p v-if="renameError" class="rename-error" role="alert">{{ renameError }}</p>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" :disabled="renamingInstance" @click="closeRename">取消</button>
+          <button type="submit" class="btn btn-primary" :disabled="renamingInstance || !renameName.trim()">
+            {{ renamingInstance ? '保存中...' : '保存' }}
+          </button>
+        </div>
+      </form>
+    </div>
+
     <div v-if="showCreateModal" class="modal-overlay" @click.self="closeCreate">
       <div class="modal">
         <div class="modal-header">
@@ -253,6 +285,8 @@
         </template>
 
         <template v-else-if="selectedAccount?.computeProvider === 'azure'">
+          <AzureCreateOptions v-if="showCreateModal" :account-id="selectedAccountId" :subscription-id="azureSubscriptionId"
+            :disabled="creating || loadingAzureLocations || loadingAzureVmSizes" @select="applyAzureCreateOption" />
           <div class="form-group">
             <label>订阅</label>
             <select v-model="createForm.subscriptionId" class="form-control" disabled>
@@ -274,16 +308,22 @@
               </select>
             </div>
             <div class="form-group">
-              <label>VM Size（免费额度适用）</label>
+              <label>VM Size（x64）</label>
               <select v-model="createForm.vmSize" class="form-control"
                 :disabled="loadingAzureVmSizes || !createForm.location">
                 <option value="" disabled>
-                  {{ loadingAzureVmSizes ? '正在加载 VM Size...' : (createForm.location && !azureVmSizes.length ? '当前区域无免费额度适用的规格' : '请选择 VM Size') }}
+                  {{ loadingAzureVmSizes ? '正在加载 VM Size...' : (azureVmSizesError ? '规格加载失败，请重试' : '请选择 VM Size') }}
                 </option>
-                <option v-for="size in azureVmSizes" :key="size.name" :value="size.name">
-                  {{ size.label || size.name }}
+                <option v-for="size in visibleAzureVmSizes" :key="size.name" :value="size.name" :disabled="size.available === false">
+                  {{ size.label || size.name }}{{ size.available === false ? `（${size.restrictionReason}）` : '' }}{{ !size.freeTierCandidate ? '（可能收费）' : '' }}
                 </option>
               </select>
+              <label class="form-hint"><input v-model="showOtherAzureSizes" type="checkbox" @change="reconcileAzureVmSize" /> 显示其他 x64 规格（可能收费）</label>
+              <p v-if="azureVmSizesError" class="form-hint">{{ azureVmSizesError }}</p>
+              <p v-else-if="!loadingAzureVmSizes && createForm.location && !visibleAzureVmSizes.some(item => item.available !== false)" class="form-hint">
+                {{ !showOtherAzureSizes && otherAvailableAzureSizes ? `默认两种规格不可用，可勾选显示其他规格（${otherAvailableAzureSizes} 种可选），或更换区域。` : '当前订阅在此区域没有可选的 x64 Gen2 规格，请更换区域。' }}
+              </p>
+              <button type="button" class="btn btn-ghost btn-sm" :disabled="loadingAzureVmSizes || !createForm.location" @click="loadAzureVmSizes()">重新加载规格</button>
             </div>
           </div>
           <div class="form-grid">
@@ -298,7 +338,8 @@
             @generating="generatingPassword = $event" />
           <div class="form-hint">
             默认镜像使用 Ubuntu 22.04 LTS Gen2，资源组和网络会按当前框架自动创建并复用。
-            仅列出免费额度适用的 x64 规格；实际是否免费取决于订阅权益有效期及剩余额度，磁盘和公网 IP 等资源单独计费。
+            默认显示可能适用免费额度的 B1s / B2ats_v2；实际是否免费取决于订阅权益有效期及剩余额度，磁盘和公网 IP 等资源单独计费。
+            其他规格需要手动勾选显示并选择；受订阅区域限制或 CPU 配额不足的规格不可选，实时容量以创建结果为准。
           </div>
         </template>
 
@@ -454,6 +495,9 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { accountsApi, cloudApi } from '../api/index.js'
 import InstancePasswordInput from '../components/InstancePasswordInput.vue'
+import AzurePublicIpDialog from '../components/AzurePublicIpDialog.vue'
+import AzureCreateOptions from '../components/AzureCreateOptions.vue'
+import AzureSubscriptionBilling from '../components/AzureSubscriptionBilling.vue'
 
 const accounts = ref([])
 const dnsAccounts = ref([])
@@ -462,16 +506,25 @@ const instances = ref([])
 const elasticIps = ref([])
 const capabilities = ref([])
 const loading = ref(false)
+const renameTarget = ref(null)
+const renameName = ref('')
+const renameError = ref('')
+const renamingInstance = ref(false)
 
 const azureSubscriptions = ref([])
 const azureSubscriptionId = ref('')
 const azureLocations = ref([])
 const azureVmSizes = ref([])
+const azureVmSizesError = ref('')
+const showOtherAzureSizes = ref(false)
+const visibleAzureVmSizes = computed(() => azureVmSizes.value.filter(item => showOtherAzureSizes.value || item.freeTierCandidate))
+const otherAvailableAzureSizes = computed(() => azureVmSizes.value.filter(item => !item.freeTierCandidate && item.available !== false).length)
 const loadingAzureSubscriptions = ref(false)
 const loadingAzureLocations = ref(false)
 const loadingAzureVmSizes = ref(false)
 
 const showCreateModal = ref(false)
+const showPublicIpModal = ref(false)
 const showSwitchIpModal = ref(false)
 const showShapeModal = ref(false)
 const showVolumesModal = ref(false)
@@ -520,6 +573,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  renameTarget.value = null
   abortAccountScopedRequests()
 })
 
@@ -554,6 +608,10 @@ async function selectAccount(id) {
 }
 
 function resetTransientState() {
+  showPublicIpModal.value = false
+  renameTarget.value = null
+  renameName.value = ''
+  renameError.value = ''
   showCreateModal.value = false
   showSwitchIpModal.value = false
   showShapeModal.value = false
@@ -569,6 +627,8 @@ function resetTransientState() {
 }
 
 function resetAzureState() {
+  azureVmSizesError.value = ''
+  showOtherAzureSizes.value = false
   azureSubscriptions.value = []
   azureSubscriptionId.value = ''
   azureLocations.value = []
@@ -673,8 +733,13 @@ function pickDefaultLocation(locations = []) {
 
 function pickDefaultVmSize(sizes = []) {
   const preferred = ['Standard_B1s', 'Standard_B2ats_v2']
-  const matched = preferred.find((name) => sizes.some((item) => item.name === name))
-  return matched || sizes[0]?.name || ''
+  return preferred.find((name) => sizes.some((item) => item.name === name && item.available !== false)) || ''
+}
+
+function reconcileAzureVmSize() {
+  if (!visibleAzureVmSizes.value.some(item => item.name === createForm.value.vmSize && item.available !== false)) {
+    createForm.value.vmSize = pickDefaultVmSize(visibleAzureVmSizes.value)
+  }
 }
 
 async function loadAzureSubscriptions(accountId = selectedAccountId.value) {
@@ -771,6 +836,7 @@ async function loadAzureVmSizes(
   abortController(azureVmSizesController)
   azureVmSizesController = null
   azureVmSizes.value = []
+  azureVmSizesError.value = ''
 
   if (!accountId || !subscriptionId || !location) {
     createForm.value.vmSize = ''
@@ -794,13 +860,13 @@ async function loadAzureVmSizes(
 
     azureVmSizes.value = response.data || []
 
-    const hasCurrentVmSize = azureVmSizes.value.some((item) => item.name === createForm.value.vmSize)
-    createForm.value.vmSize = hasCurrentVmSize ? createForm.value.vmSize : pickDefaultVmSize(azureVmSizes.value)
+    reconcileAzureVmSize()
   } catch (error) {
     if (isAbortError(error)) return
-    if (selectedAccountId.value !== accountId || azureSubscriptionId.value !== subscriptionId) return
+    if (selectedAccountId.value !== accountId || azureSubscriptionId.value !== subscriptionId ||
+        createForm.value.location !== location || requestId !== azureVmSizesRequestId) return
     createForm.value.vmSize = ''
-    toast(error.response?.data?.error || error.message, 'error')
+    azureVmSizesError.value = error.response?.data?.error || error.message
   } finally {
     if (requestId === azureVmSizesRequestId && azureVmSizesController === controller) {
       loadingAzureVmSizes.value = false
@@ -810,6 +876,8 @@ async function loadAzureVmSizes(
 }
 
 async function handleAzureSubscriptionChange() {
+  showPublicIpModal.value = false
+  renameTarget.value = null
   const accountId = selectedAccountId.value
   const subscriptionId = azureSubscriptionId.value
   abortRefreshRequest()
@@ -840,6 +908,22 @@ async function handleAzureSubscriptionChange() {
 async function handleAzureLocationChange() {
   createForm.value.vmSize = ''
   await loadAzureVmSizes(selectedAccountId.value, azureSubscriptionId.value, createForm.value.location)
+}
+
+async function applyAzureCreateOption(option) {
+  const accountId = selectedAccountId.value
+  const subscriptionId = azureSubscriptionId.value
+  createForm.value.location = option.location
+  createForm.value.vmSize = ''
+  await loadAzureVmSizes(accountId, subscriptionId, option.location)
+  if (!showCreateModal.value || selectedAccountId.value !== accountId || azureSubscriptionId.value !== subscriptionId ||
+      createForm.value.location !== option.location) return
+  if (visibleAzureVmSizes.value.some(size => size.name === option.vmSize && size.available !== false)) {
+    createForm.value.vmSize = option.vmSize
+  } else {
+    createForm.value.vmSize = ''
+    toast('该组合的可用状态已变化，请刷新推荐', 'error')
+  }
 }
 
 async function refreshCurrent() {
@@ -980,7 +1064,9 @@ async function openCreate() {
       adminPassword: ''
     }
 
+    showCreateModal.value = true
     await loadAzureLocations()
+    return
   }
 
   showCreateModal.value = true
@@ -1011,7 +1097,7 @@ async function submitCreate() {
       toast('请选择 Location', 'error')
       return
     }
-    if (!createForm.value.vmSize) {
+    if (loadingAzureVmSizes.value || !visibleAzureVmSizes.value.some(item => item.name === createForm.value.vmSize && item.available !== false)) {
       toast('请选择 VM Size', 'error')
       return
     }
@@ -1116,6 +1202,55 @@ async function addIpv6(instance) {
     await refreshCurrent()
   } catch (error) {
     toast(error.response?.data?.error || error.message, 'error')
+  }
+}
+
+function openRename(instance) {
+  if (renamingInstance.value) return
+  renameTarget.value = {
+    instance,
+    accountId: selectedAccountId.value,
+    provider: selectedAccount.value.computeProvider,
+    subscriptionId: azureSubscriptionId.value,
+    logTarget: getInstanceLogTarget(instance)
+  }
+  renameName.value = instance.displayName || ''
+  renameError.value = ''
+}
+
+function closeRename() {
+  if (!renamingInstance.value) renameTarget.value = null
+}
+
+async function confirmRename() {
+  if (renamingInstance.value || !renameTarget.value) return
+  const target = renameTarget.value
+  const displayName = renameName.value.trim()
+  if (!displayName || displayName.length > 255 || /[\u0000-\u001f\u007f]/.test(renameName.value)) {
+    renameError.value = '实例名称须为 1–255 个字符，且不能包含换行或控制字符'
+    return
+  }
+  if (displayName === target.instance.displayName) {
+    closeRename()
+    return
+  }
+
+  renamingInstance.value = true
+  renameError.value = ''
+  try {
+    const { data } = await cloudApi.renameInstance(target.accountId, target.instance.id, {
+      displayName,
+      ...(target.provider === 'azure' ? { subscriptionId: target.subscriptionId } : {})
+    }, target.logTarget)
+    if (renameTarget.value !== target) return
+    const instance = instances.value.find((item) => item.id === target.instance.id)
+    if (instance) instance.displayName = data.displayName
+    renameTarget.value = null
+    toast('实例名称已修改', 'success')
+  } catch (error) {
+    if (renameTarget.value === target) renameError.value = error.response?.data?.error || error.message
+  } finally {
+    renamingInstance.value = false
   }
 }
 
@@ -1471,6 +1606,7 @@ function validateLinuxPassword(password, provider) {
 }
 
 .instance-name {
+  overflow-wrap: anywhere;
   font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
@@ -1591,6 +1727,11 @@ function validateLinuxPassword(password, provider) {
   margin-bottom: 16px;
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+.rename-error {
+  color: var(--red);
+  font-size: 13px;
 }
 
 .modal-wide {

@@ -82,6 +82,10 @@ function cloudTargetFromPath(path, body = {}, logTarget = {}) {
   const accountName = logTarget.accountName || getAccountName(accountId)
   const targetName = logTarget.instanceName || logTarget.volumeName || logTarget.targetName || body.displayName || ''
 
+  if (/^\/api\/cloud\/[^/]+\/public-ips\/[^/]+(?:\/detach-and-delete)?$/.test(path)) {
+    return joinTarget([accountName, targetName || '公网 IP'])
+  }
+
   if (/^\/api\/cloud\/[^/]+\/instances$/.test(path)) {
     return joinTarget([accountName, targetName || '新建实例'])
   }
@@ -120,12 +124,15 @@ function actionLabel(method, path, body = {}) {
   if (method === 'DELETE' && /^\/api\/dns\/[^/]+\/records$/.test(path)) return '删除域名解析记录'
 
   if (method === 'POST' && /^\/api\/cloud\/[^/]+\/instances$/.test(path)) return '创建云实例任务'
+  if (method === 'DELETE' && /^\/api\/cloud\/[^/]+\/public-ips\/[^/]+$/.test(path)) return '删除空闲公网 IP'
+  if (method === 'POST' && /^\/api\/cloud\/[^/]+\/public-ips\/[^/]+\/detach-and-delete$/.test(path)) return '解绑空闲网卡并删除公网 IP'
   if (method === 'POST' && /^\/api\/cloud\/[^/]+\/instances\/[^/]+\/action$/.test(path)) {
     return `执行实例${INSTANCE_ACTION_LABELS[body.action] || ''}操作`
   }
   if (method === 'DELETE' && /^\/api\/cloud\/[^/]+\/instances\/[^/]+$/.test(path)) return '删除云实例'
   if (method === 'POST' && /^\/api\/cloud\/[^/]+\/instances\/[^/]+\/switch-ip$/.test(path)) return '切换实例公网地址'
   if (method === 'POST' && /^\/api\/cloud\/[^/]+\/instances\/[^/]+\/add-ipv6$/.test(path)) return '添加实例第六版公网地址'
+  if (method === 'PUT' && /^\/api\/cloud\/[^/]+\/instances\/[^/]+\/name$/.test(path)) return '修改实例名称'
   if (method === 'PUT' && /^\/api\/cloud\/[^/]+\/instances\/[^/]+\/shape$/.test(path)) return '修改实例配置'
   if (method === 'POST' && /^\/api\/cloud\/[^/]+\/instances\/[^/]+\/firewall\/allow-all$/.test(path)) return '放开实例防火墙'
   if (method === 'POST' && /^\/api\/cloud\/[^/]+\/elastic-ips\/release-unused$/.test(path)) return '释放空闲弹性公网地址'

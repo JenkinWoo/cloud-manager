@@ -38,6 +38,9 @@ export default class BaseComputeProvider {
   /** 可选：获取实例详情 */
   async getInstance(instanceId) { throw new Error('getInstance() 未实现') }
 
+  /** 可选：修改实例显示名称，@returns {Promise<{instanceId, displayName}>} */
+  async renameInstance(instanceId, displayName) { throw new Error('renameInstance() 未支持') }
+
   /** @returns {string[]} 当前 Provider 支持的功能 */
   get capabilities() { return this.constructor.capabilities || [] }
 

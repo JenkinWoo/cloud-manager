@@ -30,7 +30,9 @@ export default class CloudflareProvider extends BaseDnsProvider {
 
     const suffix = `.${this.domainName}`
     if (normalized.endsWith(suffix)) return normalized
-    if (normalized.includes('.')) {
+    // A trailing dot explicitly marks an absolute name; other dotted inputs
+    // are valid multi-level names relative to this zone.
+    if (String(name || '').trim().endsWith('.')) {
       throw new Error(`记录 "${normalized}" 不属于主域名 ${this.domainName}`)
     }
 

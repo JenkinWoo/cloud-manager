@@ -59,7 +59,7 @@ export default class HuaweiCloudProvider extends BaseDnsProvider {
     const suffix = `.${this.domainName}`
     if (normalized.endsWith(suffix)) return normalized
 
-    if (normalized.includes('.')) {
+    if (String(fullName || '').trim().endsWith('.')) {
       throw new Error(`记录 "${normalized}" 不属于主域名 ${this.domainName}`)
     }
 
