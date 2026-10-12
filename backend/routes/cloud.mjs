@@ -37,6 +37,31 @@ function setOperationLogTarget(req, target) {
   }
 }
 
+function setSwitchIpLog(req, target) {
+  setOperationLogTarget(req, target)
+}
+
+function markSwitchIpFailure(req, account, instanceId, phase, error) {
+  const message = error?.message || String(error || '未知错误')
+  const label = phase === 'dns' ? '域名更新失败' : '服务器 IP 切换失败'
+
+  setSwitchIpLog(req, {
+    switchIpPhase: phase,
+    switchIpStatus: 'failed',
+    switchIpError: message,
+    ...(phase === 'dns'
+      ? { dnsUpdateStatus: 'failed', dnsUpdateError: message }
+      : { serverSwitchStatus: 'failed', serverSwitchError: message })
+  })
+
+  console.error(
+    `[switch-ip] ${label}: account=${account.id} instance=${instanceId} ` +
+    `phase=${phase} error=${message}`
+  )
+
+  return `${label}: ${message}`
+}
+
 function getInstanceDisplayName(instance) {
   return instance?.displayName || instance?.name || ''
 }
@@ -285,8 +310,12 @@ router.delete('/instances/:instanceId', async (req, res) => {
 })
 
 router.post('/instances/:instanceId/switch-ip', async (req, res) => {
+  let account = null
+  let phase = 'server'
+
   try {
-    const account = requireAccount(req.params.accountId)
+    account = requireAccount(req.params.accountId)
+    setOperationLogTarget(req, { accountName: account.name })
     const provider = getScopedProvider(account, req)
     await attachInstanceOperationLogTarget(req, account, provider)
 
@@ -294,34 +323,104 @@ router.post('/instances/:instanceId/switch-ip', async (req, res) => {
     const body = req.body || {}
 
     const ipTypes = normalizeIpTypes(body.ipTypes ?? body.ipType ?? body.type)
+    const hasDnsUpdate = Boolean(body.dnsAccountId && body.dnsRecord)
+    setSwitchIpLog(req, {
+      switchIpPhase: 'server',
+      switchIpStatus: 'running',
+      switchIpTypes: ipTypes,
+      serverSwitchStatus: 'running',
+      dnsUpdateStatus: hasDnsUpdate ? 'pending' : 'not_requested'
+    })
+
+    console.info(
+      `[switch-ip] start: account=${account.id} instance=${req.params.instanceId} ` +
+      `types=${ipTypes.join(',')} dns=${hasDnsUpdate ? 'enabled' : 'disabled'}`
+    )
 
     if (ipTypes.includes('ipv4') && !providerCapabilities.includes('switch_ip') && !providerCapabilities.includes('elastic_ip')) {
-      return res.status(400).json({ error: `${account.computeProvider} 不支持切换 IP` })
+      const error = new Error(`${account.computeProvider} 不支持切换 IP`)
+      const message = markSwitchIpFailure(req, account, req.params.instanceId, 'server', error)
+      return res.status(400).json({ error: message, stage: 'server' })
     }
     if (ipTypes.includes('ipv6') && !providerCapabilities.includes('switch_ipv6')) {
-      return res.status(400).json({ error: `${account.computeProvider} 不支持切换 IPv6` })
+      const error = new Error(`${account.computeProvider} 不支持切换 IPv6`)
+      const message = markSwitchIpFailure(req, account, req.params.instanceId, 'server', error)
+      return res.status(400).json({ error: message, stage: 'server' })
     }
 
     const result = await provider.switchPublicIp(req.params.instanceId, { ipTypes })
+    setSwitchIpLog(req, {
+      serverSwitchStatus: 'success',
+      serverSwitchResult: {
+        newIpv4: result.newIpv4 || '',
+        newIpv6: result.newIpv6 || '',
+        newIp: result.newIp || result.newPublicIp || ''
+      }
+    })
+    console.info(
+      `[switch-ip] server switch succeeded: account=${account.id} instance=${req.params.instanceId} ` +
+      `ipv4=${result.newIpv4 || result.newIp || result.newPublicIp || '-'} ipv6=${result.newIpv6 || '-'}`
+    )
+
     const { dnsAccountId, dnsRecord } = body
     const dnsUpdates = []
 
     if (dnsAccountId && dnsRecord) {
+      phase = 'dns'
+      setSwitchIpLog(req, {
+        switchIpPhase: 'dns',
+        dnsAccountId,
+        dnsRecord,
+        dnsUpdateStatus: 'running',
+        dnsUpdateResults: []
+      })
+
       const dnsAccount = dnsAccountsDb.data.dnsAccounts.find((item) => item.id === dnsAccountId)
-      if (dnsAccount) {
-        const dnsProvider = getDnsProvider(dnsAccount)
-        if (ipTypes.includes('ipv4') && result.newIpv4) {
-          dnsUpdates.push(await dnsProvider.upsertRecord(dnsRecord, result.newIpv4, 'A'))
-        }
-        if (ipTypes.includes('ipv6') && result.newIpv6) {
-          dnsUpdates.push(await dnsProvider.upsertRecord(dnsRecord, result.newIpv6, 'AAAA'))
+      if (!dnsAccount) {
+        throw Object.assign(new Error(`找不到 DNS 账户: ${dnsAccountId}`), { switchIpStage: 'dns' })
+      }
+
+      const dnsProvider = getDnsProvider(dnsAccount)
+      const dnsUpdateResults = []
+      const updateRecord = async (recordType, address) => {
+        try {
+          const update = await dnsProvider.upsertRecord(dnsRecord, address, recordType)
+          dnsUpdates.push(update)
+          dnsUpdateResults.push({ type: recordType, status: 'success', address })
+          setSwitchIpLog(req, { dnsUpdateResults: dnsUpdateResults.slice() })
+        } catch (error) {
+          dnsUpdateResults.push({ type: recordType, status: 'failed', address, error: error.message })
+          setSwitchIpLog(req, {
+            dnsUpdateResults: dnsUpdateResults.slice(),
+            dnsUpdateStatus: 'failed',
+            dnsUpdateError: error.message
+          })
+          throw Object.assign(error, { switchIpStage: 'dns' })
         }
       }
+
+      if (ipTypes.includes('ipv4') && result.newIpv4) await updateRecord('A', result.newIpv4)
+      if (ipTypes.includes('ipv6') && result.newIpv6) await updateRecord('AAAA', result.newIpv6)
+
+      setSwitchIpLog(req, {
+        dnsUpdateStatus: 'success',
+        switchIpPhase: 'complete',
+        switchIpStatus: 'success',
+        dnsUpdateResults
+      })
+      console.info(
+        `[switch-ip] DNS update succeeded: account=${account.id} instance=${req.params.instanceId} ` +
+        `record=${dnsRecord} updates=${dnsUpdateResults.length}`
+      )
+    } else {
+      setSwitchIpLog(req, { switchIpPhase: 'complete', switchIpStatus: 'success' })
     }
 
     res.json({ success: true, ...result, dnsUpdates })
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    if (!account) return res.status(500).json({ error: err.message })
+    const message = markSwitchIpFailure(req, account, req.params.instanceId, err.switchIpStage || phase, err)
+    res.status(500).json({ error: message, stage: err.switchIpStage || phase })
   }
 })
 

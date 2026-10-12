@@ -377,16 +377,69 @@
         </div>
         <div class="form-group">
           <label>同步更新 DNS 账户（可选）</label>
-          <select v-model="switchIpForm.dnsAccountId" class="form-control">
+          <select v-model="switchIpForm.dnsAccountId" class="form-control" :disabled="switchingIp"
+            @change="changeSwitchDnsAccount">
             <option value="">不更新 DNS</option>
             <option v-for="account in dnsAccounts" :key="account.id" :value="account.id">{{ account.name }}</option>
           </select>
         </div>
-        <div class="form-group">
-          <label>记录名</label>
-          <input v-model="switchIpForm.dnsRecord" class="form-control" placeholder="例如 www.frp.gs" />
-          <small class="form-hint">选择 IPv4 会更新 A 记录，选择 IPv6 会更新 AAAA 记录。</small>
-        </div>
+        <template v-if="switchIpForm.dnsAccountId">
+          <div class="form-group">
+            <label>记录名来源</label>
+            <select v-model="switchDnsMode" class="form-control" :disabled="switchingIp"
+              @change="changeSwitchDnsMode">
+              <option value="existing">选择已有 DNS 记录</option>
+              <option value="manual">手动填写记录名</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>绑定记录名</label>
+            <template v-if="switchDnsMode === 'existing'">
+              <div class="searchable-select" :class="{ open: switchDnsRecordOpen }">
+                <input
+                  v-model="switchDnsRecordQuery"
+                  class="form-control searchable-select-input"
+                  :disabled="switchingIp || loadingSwitchDnsRecords || !!switchDnsError"
+                  :placeholder="loadingSwitchDnsRecords ? '正在加载 DNS 记录...' : '搜索或选择 DNS 记录'"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  :aria-expanded="switchDnsRecordOpen"
+                  @focus="openSwitchDnsRecordPicker"
+                  @input="handleSwitchDnsRecordInput"
+                  @keydown="handleSwitchDnsRecordKeydown"
+                  @blur="closeSwitchDnsRecordPicker"
+                />
+                <div v-if="switchDnsRecordOpen && !switchDnsError && !loadingSwitchDnsRecords" class="searchable-select-menu">
+                  <button
+                    v-for="record in filteredSwitchDnsRecordOptions"
+                    :key="record.name"
+                    type="button"
+                    class="searchable-select-option"
+                    :class="{ selected: switchIpForm.dnsRecord === record.name }"
+                    @mousedown.prevent
+                    @click="selectSwitchDnsRecord(record)"
+                  >
+                    <span>{{ record.name }}</span>
+                    <small>{{ record.details.join(' / ') }}</small>
+                  </button>
+                  <div v-if="!filteredSwitchDnsRecordOptions.length" class="searchable-select-empty">
+                    未找到匹配的 DNS 记录
+                  </div>
+                </div>
+              </div>
+              <div v-if="switchDnsError" class="form-hint" role="alert">
+                {{ switchDnsError }}
+                <button class="btn btn-ghost" :disabled="switchingIp" @click="loadSwitchDnsRecords">重试</button>
+              </div>
+              <small v-else-if="!loadingSwitchDnsRecords && !switchDnsRecordOptions.length" class="form-hint">
+                当前账户没有 A/AAAA 记录，可切换为手动填写记录名。
+              </small>
+            </template>
+            <input v-else v-model="switchIpForm.dnsRecord" class="form-control" :disabled="switchingIp"
+              placeholder="例如 www、@ 或 www.example.com" />
+            <small class="form-hint">切换成功后，IPv4 同步到该名称的 A 记录，IPv6 同步到 AAAA 记录；缺少的类型会自动创建。</small>
+          </div>
+        </template>
         <div class="modal-footer">
           <button class="btn btn-ghost" @click="closeSwitchIp">取消</button>
           <button class="btn btn-primary" :disabled="switchingIp" @click="confirmSwitchIp">
@@ -493,7 +546,8 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { accountsApi, cloudApi } from '../api/index.js'
+import { accountsApi, cloudApi, dnsApi } from '../api/index.js'
+import { toFullRecordName } from '../utils/dnsRecordName.js'
 import InstancePasswordInput from '../components/InstancePasswordInput.vue'
 import AzurePublicIpDialog from '../components/AzurePublicIpDialog.vue'
 import AzureCreateOptions from '../components/AzureCreateOptions.vue'
@@ -543,6 +597,40 @@ const resizingVolume = ref(false)
 const volumes = ref([])
 const createForm = ref({})
 const switchIpForm = ref({ ipTypes: ['ipv4'], dnsAccountId: '', dnsRecord: '' })
+const switchDnsMode = ref('existing')
+const switchDnsRecords = ref([])
+const loadingSwitchDnsRecords = ref(false)
+const switchDnsError = ref('')
+const switchDnsRecordQuery = ref('')
+const switchDnsRecordOpen = ref(false)
+let switchDnsRequestId = 0
+const switchDnsRecordOptions = computed(() => {
+  const names = new Map()
+  for (const record of switchDnsRecords.value) {
+    if (!['A', 'AAAA'].includes(record.type) || !record.name) continue
+    const name = toFullRecordName(record.name, switchDnsDomain())
+    if (!names.has(name)) names.set(name, { name, details: [] })
+    names.get(name).details.push(`${record.type}: ${record.content}`)
+  }
+  return [...names.values()].sort((a, b) => a.name.localeCompare(b.name))
+})
+const filteredSwitchDnsRecordOptions = computed(() => {
+  const query = switchDnsRecordQuery.value.trim().toLocaleLowerCase()
+  if (!query) return switchDnsRecordOptions.value
+
+  return switchDnsRecordOptions.value.filter((record) => {
+    const text = `${record.name} ${record.details.join(' ')}`.toLocaleLowerCase()
+    if (text.includes(query)) return true
+
+    let cursor = 0
+    for (const character of query) {
+      cursor = text.indexOf(character, cursor)
+      if (cursor < 0) return false
+      cursor += character.length
+    }
+    return true
+  })
+})
 const shapeForm = ref({ ocpus: 1, memoryGb: 6 })
 const volumeSizeForm = ref({ sizeInGBs: 0 })
 
@@ -573,6 +661,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  resetSwitchDnsRecords()
   renameTarget.value = null
   abortAccountScopedRequests()
 })
@@ -608,6 +697,7 @@ async function selectAccount(id) {
 }
 
 function resetTransientState() {
+  resetSwitchDnsRecords()
   showPublicIpModal.value = false
   renameTarget.value = null
   renameName.value = ''
@@ -1147,13 +1237,107 @@ async function terminate(instance) {
 }
 
 function openSwitchIp(instance) {
+  resetSwitchDnsRecords()
+  switchDnsMode.value = 'existing'
+  switchDnsRecordQuery.value = ''
+  switchDnsRecordOpen.value = false
   selectedInstance.value = instance
   switchIpForm.value = { ipTypes: defaultSwitchIpTypes(), dnsAccountId: '', dnsRecord: '' }
   showSwitchIpModal.value = true
 }
 
 function closeSwitchIp() {
+  if (switchingIp.value) return
+  resetSwitchDnsRecords()
+  switchDnsRecordQuery.value = ''
+  switchDnsRecordOpen.value = false
   showSwitchIpModal.value = false
+}
+
+function switchDnsDomain() {
+  return dnsAccounts.value.find(item => item.id === switchIpForm.value.dnsAccountId)?.credentials?.domainName || ''
+}
+
+function resetSwitchDnsRecords() {
+  switchDnsRequestId += 1
+  switchDnsRecords.value = []
+  switchDnsError.value = ''
+  loadingSwitchDnsRecords.value = false
+  switchDnsRecordQuery.value = ''
+  switchDnsRecordOpen.value = false
+}
+
+function changeSwitchDnsAccount() {
+  switchIpForm.value.dnsRecord = ''
+  switchDnsMode.value = 'existing'
+  switchDnsRecordQuery.value = ''
+  switchDnsRecordOpen.value = false
+  resetSwitchDnsRecords()
+  if (switchIpForm.value.dnsAccountId) loadSwitchDnsRecords()
+}
+
+function changeSwitchDnsMode() {
+  switchIpForm.value.dnsRecord = ''
+  switchDnsRecordQuery.value = ''
+  switchDnsRecordOpen.value = false
+}
+
+function openSwitchDnsRecordPicker() {
+  if (switchingIp.value || loadingSwitchDnsRecords.value || switchDnsError.value) return
+  switchDnsRecordOpen.value = true
+}
+
+function closeSwitchDnsRecordPicker() {
+  window.setTimeout(() => {
+    switchDnsRecordOpen.value = false
+  }, 120)
+}
+
+function handleSwitchDnsRecordInput() {
+  switchDnsRecordOpen.value = true
+  if (switchDnsRecordQuery.value !== switchIpForm.value.dnsRecord) {
+    switchIpForm.value.dnsRecord = ''
+  }
+}
+
+function handleSwitchDnsRecordKeydown(event) {
+  if (event.key === 'Escape') {
+    switchDnsRecordOpen.value = false
+    return
+  }
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    switchDnsRecordOpen.value = true
+    return
+  }
+  if (event.key === 'Enter' && filteredSwitchDnsRecordOptions.value.length === 1) {
+    event.preventDefault()
+    selectSwitchDnsRecord(filteredSwitchDnsRecordOptions.value[0])
+  }
+}
+
+function selectSwitchDnsRecord(record) {
+  switchIpForm.value.dnsRecord = record.name
+  switchDnsRecordQuery.value = record.name
+  switchDnsRecordOpen.value = false
+}
+
+async function loadSwitchDnsRecords() {
+  const accountId = switchIpForm.value.dnsAccountId
+  if (!accountId) return
+  const requestId = ++switchDnsRequestId
+  loadingSwitchDnsRecords.value = true
+  switchDnsError.value = ''
+  try {
+    const { data } = await dnsApi.listRecords(accountId)
+    if (requestId !== switchDnsRequestId || accountId !== switchIpForm.value.dnsAccountId) return
+    switchDnsRecords.value = Array.isArray(data) ? data : []
+  } catch (error) {
+    if (requestId !== switchDnsRequestId || accountId !== switchIpForm.value.dnsAccountId) return
+    switchDnsError.value = `加载 DNS 记录失败：${error.response?.data?.error || error.message}`
+  } finally {
+    if (requestId === switchDnsRequestId) loadingSwitchDnsRecords.value = false
+  }
 }
 
 async function confirmSwitchIp() {
@@ -1163,12 +1347,31 @@ async function confirmSwitchIp() {
     return
   }
 
+  let dnsRecord = ''
+  if (switchIpForm.value.dnsAccountId) {
+    if (!switchIpForm.value.dnsRecord.trim()) {
+      toast('请选择或填写要绑定的 DNS 记录名', 'error')
+      return
+    }
+    if (switchDnsMode.value === 'existing' && (loadingSwitchDnsRecords.value || switchDnsError.value
+      || !switchDnsRecordOptions.value.some(record => record.name === switchIpForm.value.dnsRecord))) {
+      toast('请等待 DNS 记录加载成功后重新选择', 'error')
+      return
+    }
+    try {
+      dnsRecord = toFullRecordName(switchIpForm.value.dnsRecord, switchDnsDomain())
+    } catch (error) {
+      toast(error.message, 'error')
+      return
+    }
+  }
+
   switchingIp.value = true
   try {
     const payload = getRequestBody({ ipTypes })
     if (switchIpForm.value.dnsAccountId && switchIpForm.value.dnsRecord) {
       payload.dnsAccountId = switchIpForm.value.dnsAccountId
-      payload.dnsRecord = switchIpForm.value.dnsRecord
+      payload.dnsRecord = dnsRecord
     }
 
     const response = await cloudApi.switchIp(
@@ -1178,6 +1381,7 @@ async function confirmSwitchIp() {
       getInstanceLogTarget(selectedInstance.value)
     )
     toast(formatSwitchIpResult(response.data), 'success')
+    switchingIp.value = false
     closeSwitchIp()
     await refreshCurrent()
   } catch (error) {
@@ -1694,6 +1898,60 @@ function validateLinuxPassword(password, provider) {
   margin-top: 6px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.searchable-select {
+  position: relative;
+}
+
+.searchable-select-input {
+  width: 100%;
+}
+
+.searchable-select-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.searchable-select-option {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.searchable-select-option:hover,
+.searchable-select-option.selected {
+  background: var(--accent-dim);
+}
+
+.searchable-select-option small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.searchable-select-empty {
+  padding: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .checkbox-group {
