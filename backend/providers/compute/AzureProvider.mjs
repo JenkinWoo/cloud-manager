@@ -13,6 +13,7 @@ const DISPLAY_NAME_TAG = 'cloud-manager-display-name'
 const VM_RESOURCE_PROVIDERS = ['Microsoft.Network', 'Microsoft.Compute']
 const PROVIDER_REGISTRATION_TIMEOUT_MS = 120000
 const PROVIDER_REGISTRATION_POLL_MS = 5000
+const AZURE_FREE_ONLY = !['0', 'false', 'off', 'no'].includes(String(process.env.AZURE_FREE_ONLY || 'true').trim().toLowerCase())
 // https://azure.microsoft.com/en-us/free/ — free allowance SKUs, not billing entitlement.
 // B2pts_v2 uses Arm and is incompatible with the default Ubuntu x64 image.
 const AZURE_FREE_TIER_X64_VM_SIZES = new Set(['Standard_B1s', 'Standard_B2ats_v2'])
@@ -130,7 +131,14 @@ async function loadAzureSdk() {
 
 export default class AzureProvider extends BaseComputeProvider {
   static providerName = 'azure'
-  static capabilities = ['switch_ip', 'switch_ipv6', 'allow_all_inbound_traffic', 'rename_instance', 'manage_public_ips']
+  static get capabilities() {
+    return [
+      ...(AZURE_FREE_ONLY ? [] : ['switch_ip', 'switch_ipv6']),
+      'allow_all_inbound_traffic',
+      'rename_instance',
+      'manage_public_ips'
+    ]
+  }
 
   constructor(account) {
     super(account)
@@ -606,12 +614,14 @@ export default class AzureProvider extends BaseComputeProvider {
           const requestOptions = { abortSignal: controller.signal }
           const [allSizes, usages] = await Promise.all([
             this._listVmSizes(this.computeClient, location.name, requestOptions),
-            this._listNetworkUsage(this.networkClient, location.name, requestOptions)
+            AZURE_FREE_ONLY ? Promise.resolve([]) : this._listNetworkUsage(this.networkClient, location.name, requestOptions)
           ])
           const sizes = allSizes.filter(size => size.freeTierCandidate)
-          const publicIpQuota = getAzurePublicIpQuota(usages)
-          const ready = publicIpQuota.sufficient === true && sizes.some(size => size.available)
-          const unknown = publicIpQuota.sufficient === null || sizes.some(size => size.quota.sufficient === null)
+          const publicIpQuota = AZURE_FREE_ONLY
+            ? { sufficient: true, remainingAddresses: null, freeMode: true, reason: '免费模式不会创建公网 IP' }
+            : getAzurePublicIpQuota(usages)
+          const ready = (AZURE_FREE_ONLY || publicIpQuota.sufficient === true) && sizes.some(size => size.available)
+          const unknown = !AZURE_FREE_ONLY && (publicIpQuota.sufficient === null || sizes.some(size => size.quota.sufficient === null))
           regions.push({ location: location.name, displayName: location.displayName,
             sizes, publicIpQuota, status: ready ? 'ready' : unknown ? 'unknown' : 'blocked',
             reason: publicIpQuota.reason || (sizes.length ? '' : '此区域没有兼容的 x64 免费候选规格') })
@@ -987,6 +997,13 @@ export default class AzureProvider extends BaseComputeProvider {
     const imageSku = params.imageSku || '22_04-lts-gen2'
     const imageVersion = params.imageVersion || 'latest'
 
+    if (AZURE_FREE_ONLY && !AZURE_FREE_TIER_X64_VM_SIZES.has(vmSize)) {
+      throw Object.assign(new Error(`免费模式仅允许使用 ${[...AZURE_FREE_TIER_X64_VM_SIZES].join(' / ')} VM 规格`), {
+        code: 'FreeOnlyMode',
+        retryable: false
+      })
+    }
+
     const creationId = context.creationId || randomUUID()
     const vmName = `cm-${createHash('sha256').update(creationId).digest('hex').slice(0, 32)}`
     await withAzureNetworkRetry('检查资源提供程序注册', () => this._ensureResourceProvidersRegistered())
@@ -1006,22 +1023,26 @@ export default class AzureProvider extends BaseComputeProvider {
       }
     }
 
-    const publicIpName = `${vmName}-pip`
     const nicName = `${vmName}-nic`
     await withAzureNetworkRetry('检查订阅区域策略', () => this._assertLocationAllowed(location))
     // Check current quota before allocating network or VM resources.
     await withAzureNetworkRetry('检查实例规格可用性', () => this._assertVmSizeAvailable(location, vmSize))
-    const existingPublicIp = await withAzureNetworkRetry('检查公网 IP 配额', () => this._assertPublicIpCapacity(location, publicIpName, vmName))
+    const publicIpName = `${vmName}-pip`
+    const existingPublicIp = AZURE_FREE_ONLY
+      ? null
+      : await withAzureNetworkRetry('检查公网 IP 配额', () => this._assertPublicIpCapacity(location, publicIpName, vmName))
     const network = await this._ensureDefaultNetwork(location)
     // The task ID survives retries and restarts. Never generate another set of
     // resources merely because Azure accepted a PUT but its response was lost.
-    const publicIp = existingPublicIp || await withAzureNetworkRetry('创建公网 IP', () => this.networkClient.publicIPAddresses.beginCreateOrUpdateAndWait(network.resourceGroupName, publicIpName, {
-      location,
-      publicIPAllocationMethod: 'Static',
-      publicIPAddressVersion: 'IPv4',
-      sku: { name: 'Standard' },
-      tags: { managedBy: 'cloud-manager', vmName }
-    }))
+    const publicIp = AZURE_FREE_ONLY
+      ? null
+      : existingPublicIp || await withAzureNetworkRetry('创建公网 IP', () => this.networkClient.publicIPAddresses.beginCreateOrUpdateAndWait(network.resourceGroupName, publicIpName, {
+        location,
+        publicIPAllocationMethod: 'Static',
+        publicIPAddressVersion: 'IPv4',
+        sku: { name: 'Standard' },
+        tags: { managedBy: 'cloud-manager', vmName }
+      }))
 
     const nic = await withAzureNetworkRetry('创建网卡', () => this.networkClient.networkInterfaces.beginCreateOrUpdateAndWait(network.resourceGroupName, nicName, {
       location,
@@ -1032,7 +1053,7 @@ export default class AzureProvider extends BaseComputeProvider {
           name: 'ipconfig1',
           subnet: { id: network.subnet.id },
           privateIPAllocationMethod: 'Dynamic',
-          publicIPAddress: { id: publicIp.id },
+          ...(publicIp ? { publicIPAddress: { id: publicIp.id } } : {}),
           primary: true
         }
       ]
@@ -1364,6 +1385,10 @@ export default class AzureProvider extends BaseComputeProvider {
   }
 
   async switchPublicIp(instanceId, options = {}) {
+    if (AZURE_FREE_ONLY) {
+      throw Object.assign(new Error('免费模式不会创建或切换公网 IP；如需公网 IP，请关闭 AZURE_FREE_ONLY'), { code: 'FreeOnlyMode' })
+    }
+
     const { switchIpv4, switchIpv6 } = this._resolveSwitchIpTypes(options)
     const result = { switchedTypes: [] }
 

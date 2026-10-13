@@ -13,7 +13,9 @@
         <li v-for="option in result.options" :key="`${option.location}/${option.vmSize}`">
           <div>
             <strong>{{ option.displayName }} ({{ option.location }}) · {{ option.vmSize }}</strong>
-            <p class="form-hint">{{ option.numberOfCores }} vCPU · {{ option.memoryInMB / 1024 }} GB；剩余 CPU {{ option.cpuQuota.remainingCores }} 核，公网 IP {{ option.publicIpQuota.remainingAddresses }} 个</p>
+            <p v-if="option.publicIpQuota?.freeMode" class="form-hint">免费模式：不会创建公网 IP</p>
+            <p v-if="!option.publicIpQuota?.freeMode" class="form-hint">{{ option.numberOfCores }} vCPU · {{ option.memoryInMB / 1024 }} GB；剩余 CPU {{ option.cpuQuota.remainingCores }} 核，公网 IP {{ option.publicIpQuota.remainingAddresses }} 个</p>
+            <p v-else class="form-hint">{{ option.numberOfCores }} vCPU · {{ option.memoryInMB / 1024 }} GB；剩余 CPU {{ option.cpuQuota.remainingCores }} 核</p>
           </div>
           <button type="button" class="btn btn-ghost btn-sm" :disabled="disabled" @click="emit('select', option)">选择</button>
         </li>
