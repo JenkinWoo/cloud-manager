@@ -25,7 +25,7 @@
           <tbody>
             <tr v-for="ip in filteredIps" :key="ip.id">
               <td :title="ip.id"><div>{{ ip.name }}</div><small>{{ ip.resourceGroup }}</small></td>
-              <td>{{ ip.ipAddress || '尚未分配' }}<br /><small>{{ ip.version }}</small></td>
+              <td>{{ ip.ipAddress || '尚未分配' }}<br /><small>{{ ip.version }} / {{ ip.sku || '未知 SKU' }} / {{ ip.allocationMethod || '未知分配方式' }}</small></td>
               <td>{{ ip.region }}</td>
               <td><span :class="['badge', ip.associated ? 'badge-pending' : 'badge-running']">{{ ip.canDetach ? '网卡未绑定实例' : (ip.associated ? '已关联' : '未关联') }}</span>
                 <div v-if="ip.detachReason" class="association">{{ ip.detachReason }}</div>

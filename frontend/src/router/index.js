@@ -6,6 +6,7 @@ import DnsManager from '../views/DnsManager.vue'
 import TaskQueue from '../views/TaskQueue.vue'
 import SystemLogs from '../views/SystemLogs.vue'
 import Settings from '../views/Settings.vue'
+import Billing from '../views/Billing.vue'
 
 const routes = [
   { path: '/login', component: () => import('../views/Login.vue'), meta: { title: 'Login', public: true } },
@@ -13,6 +14,7 @@ const routes = [
   { path: '/accounts', component: Accounts, meta: { title: 'Accounts' } },
   { path: '/cloud', component: () => import('../views/CloudInstances.vue'), meta: { title: 'Cloud Instances' } },
   { path: '/cloud-monitor', component: () => import('../views/CloudTrafficMonitor.vue'), meta: { title: 'Cloud Traffic Monitor' } },
+  { path: '/billing', component: Billing, meta: { title: 'Billing' } },
   { path: '/dns', component: DnsManager, meta: { title: 'DNS Manager' } },
   { path: '/tasks', component: TaskQueue, meta: { title: 'Task Queue' } },
   { path: '/logs', component: SystemLogs, meta: { title: 'System Logs' } },

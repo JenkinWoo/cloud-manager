@@ -8,7 +8,7 @@
       <div class="header-actions">
         <button v-if="isAzureAccount" class="btn btn-ghost" :disabled="!azureSubscriptionId" @click="showPublicIpModal = true">管理公网 IP</button>
         <button class="btn btn-ghost" :disabled="!selectedAccountId || loading" @click="refreshCurrent">刷新</button>
-        <button class="btn btn-primary" :disabled="!selectedAccountId || !canCreate" @click="openCreate">新建实例</button>
+        <button class="btn btn-primary" :disabled="!selectedAccountId || !canCreate" :title="azureCostBlocked ? azureCostReason : ''" @click="openCreate">新建实例</button>
       </div>
     </div>
 
@@ -46,11 +46,11 @@
           </div>
         </div>
 
-        <div v-if="isAzureAccount" class="card azure-filter-card">
-          <div class="section-header">
+        <div v-if="isAzureAccount && azureSubscriptionId" class="card azure-filter-card">
+          <div v-if="azureSubscriptions.length > 1" class="section-header">
             <h2>Azure 订阅</h2>
           </div>
-          <div class="form-group">
+          <div v-if="azureSubscriptions.length > 1" class="form-group">
             <label>订阅</label>
             <select v-model="azureSubscriptionId" class="form-control" :disabled="loadingAzureSubscriptions"
               @change="handleAzureSubscriptionChange">
@@ -132,15 +132,15 @@
               <button v-if="hasCapability('rename_instance')" class="btn btn-ghost btn-sm"
                 :disabled="renamingInstance" @click="openRename(instance)">修改名称</button>
               <button v-if="['STOPPED', 'TERMINATED'].includes(normalizeState(instance.state))"
-                class="btn btn-success btn-sm" @click="runAction(instance, 'START')">
+                class="btn btn-success btn-sm" :disabled="azureCostBlocked" :title="azureCostBlocked ? azureCostReason : ''" @click="runAction(instance, 'START')">
                 启动
               </button>
               <button v-if="normalizeState(instance.state) === 'RUNNING'" class="btn btn-warning btn-sm"
                 @click="runAction(instance, 'STOP')">
-                停止
+                {{ isAzureAccount ? '停止并释放计算资源' : '停止' }}
               </button>
               <button v-if="normalizeState(instance.state) === 'RUNNING'" class="btn btn-ghost btn-sm"
-                @click="runAction(instance, 'REBOOT')">
+                :disabled="azureCostBlocked" :title="azureCostBlocked ? azureCostReason : ''" @click="runAction(instance, 'REBOOT')">
                 重启
               </button>
               <button v-if="canSwitchAnyIp()" class="btn btn-ghost btn-sm"
@@ -308,20 +308,19 @@
               </select>
             </div>
             <div class="form-group">
-              <label>VM Size（x64）</label>
+              <label>VM Size（免费额度规格）</label>
               <select v-model="createForm.vmSize" class="form-control"
                 :disabled="loadingAzureVmSizes || !createForm.location">
                 <option value="" disabled>
                   {{ loadingAzureVmSizes ? '正在加载 VM Size...' : (azureVmSizesError ? '规格加载失败，请重试' : '请选择 VM Size') }}
                 </option>
                 <option v-for="size in visibleAzureVmSizes" :key="size.name" :value="size.name" :disabled="size.available === false">
-                  {{ size.label || size.name }}{{ size.available === false ? `（${size.restrictionReason}）` : '' }}{{ !size.freeTierCandidate ? '（可能收费）' : '' }}
+                  {{ size.label || size.name }}{{ size.available === false ? `（${size.restrictionReason}）` : '' }}
                 </option>
               </select>
-              <label class="form-hint"><input v-model="showOtherAzureSizes" type="checkbox" @change="reconcileAzureVmSize" /> 显示其他 x64 规格（可能收费）</label>
               <p v-if="azureVmSizesError" class="form-hint">{{ azureVmSizesError }}</p>
               <p v-else-if="!loadingAzureVmSizes && createForm.location && !visibleAzureVmSizes.some(item => item.available !== false)" class="form-hint">
-                {{ !showOtherAzureSizes && otherAvailableAzureSizes ? `默认两种规格不可用，可勾选显示其他规格（${otherAvailableAzureSizes} 种可选），或更换区域。` : '当前订阅在此区域没有可选的 x64 Gen2 规格，请更换区域。' }}
+                当前区域没有可分配的免费额度规格，请更换区域或刷新推荐。
               </p>
               <button type="button" class="btn btn-ghost btn-sm" :disabled="loadingAzureVmSizes || !createForm.location" @click="loadAzureVmSizes()">重新加载规格</button>
             </div>
@@ -337,15 +336,13 @@
             rule="12–72 位，至少包含大小写字母、数字、特殊字符中的三类。"
             @generating="generatingPassword = $event" />
           <div class="form-hint">
-            默认镜像使用 Ubuntu 22.04 LTS Gen2，资源组和网络会按当前框架自动创建并复用。
-            默认显示可能适用免费额度的 B1s / B2ats_v2；实际是否免费取决于订阅权益有效期及剩余额度，磁盘和公网 IP 等资源单独计费。
-            其他规格需要手动勾选显示并选择；受订阅区域限制或 CPU 配额不足的规格不可选，实时容量以创建结果为准。
+            {{ azureCostReason }}
           </div>
         </template>
 
         <div class="modal-footer">
           <button class="btn btn-ghost" @click="closeCreate">取消</button>
-          <button class="btn btn-primary" :disabled="creating || generatingPassword" @click="submitCreate">
+          <button class="btn btn-primary" :disabled="creating || generatingPassword || !canCreate" @click="submitCreate">
             {{ creating ? '提交中...' : '加入任务队列' }}
           </button>
         </div>
@@ -570,9 +567,8 @@ const azureSubscriptionId = ref('')
 const azureLocations = ref([])
 const azureVmSizes = ref([])
 const azureVmSizesError = ref('')
-const showOtherAzureSizes = ref(false)
-const visibleAzureVmSizes = computed(() => azureVmSizes.value.filter(item => showOtherAzureSizes.value || item.freeTierCandidate))
-const otherAvailableAzureSizes = computed(() => azureVmSizes.value.filter(item => !item.freeTierCandidate && item.available !== false).length)
+const azureCostPolicy = ref(null)
+const visibleAzureVmSizes = computed(() => azureVmSizes.value.filter(item => item.freeTierCandidate === true))
 const loadingAzureSubscriptions = ref(false)
 const loadingAzureLocations = ref(false)
 const loadingAzureVmSizes = ref(false)
@@ -636,12 +632,16 @@ const volumeSizeForm = ref({ sizeInGBs: 0 })
 
 const selectedAccount = computed(() => accounts.value.find((item) => item.id === selectedAccountId.value) || null)
 const isAzureAccount = computed(() => selectedAccount.value?.computeProvider === 'azure')
+const azureCostBlocked = computed(() => isAzureAccount.value &&
+  (azureCostPolicy.value?.creationAllowed !== true || azureCostPolicy.value?.startAllowed !== true))
+const azureCostReason = computed(() => azureCostPolicy.value?.reason ||
+  '正在加载免费实例配置，请稍后重试。')
 const selectedAzureSubscription = computed(
   () => azureSubscriptions.value.find((item) => item.subscriptionId === azureSubscriptionId.value) || null
 )
 const canCreate = computed(() => {
   if (!selectedAccount.value) return false
-  if (selectedAccount.value.computeProvider === 'azure') return Boolean(azureSubscriptionId.value)
+  if (selectedAccount.value.computeProvider === 'azure') return Boolean(azureSubscriptionId.value) && !azureCostBlocked.value
   return ['oracle', 'aws', 'azure'].includes(selectedAccount.value.computeProvider)
 })
 
@@ -681,6 +681,7 @@ async function selectAccount(id) {
   abortAccountScopedRequests()
 
   selectedAccountId.value = id
+  azureCostPolicy.value = null
   instances.value = []
   elasticIps.value = []
   capabilities.value = []
@@ -718,7 +719,6 @@ function resetTransientState() {
 
 function resetAzureState() {
   azureVmSizesError.value = ''
-  showOtherAzureSizes.value = false
   azureSubscriptions.value = []
   azureSubscriptionId.value = ''
   azureLocations.value = []
@@ -822,7 +822,7 @@ function pickDefaultLocation(locations = []) {
 }
 
 function pickDefaultVmSize(sizes = []) {
-  const preferred = ['Standard_B1s', 'Standard_B2ats_v2']
+  const preferred = ['Standard_B1s', 'Standard_B2ats_v2', 'Standard_B2pts_v2']
   return preferred.find((name) => sizes.some((item) => item.name === name && item.available !== false)) || ''
 }
 
@@ -1058,6 +1058,7 @@ async function refreshCurrent() {
 
     const nextCapabilities = capabilitiesRes.data.capabilities || []
     capabilities.value = nextCapabilities
+    azureCostPolicy.value = capabilitiesRes.data.costPolicy || null
     instances.value = instanceRes.data || []
 
     if (nextCapabilities.includes('elastic_ip')) {
@@ -1170,6 +1171,7 @@ function closeCreate() {
 
 async function submitCreate() {
   if (creating.value || generatingPassword.value) return
+  if (azureCostBlocked.value) return toast(azureCostReason.value, 'error')
   if (['oracle', 'aws'].includes(selectedAccount.value?.computeProvider)) {
     const passwordError = validateLinuxPassword(createForm.value.rootPassword, selectedAccount.value.computeProvider)
     if (passwordError) {
@@ -1214,6 +1216,7 @@ async function submitCreate() {
 }
 
 async function runAction(instance, action) {
+  if (azureCostBlocked.value && ['START', 'REBOOT', 'HARD_REBOOT'].includes(action)) return toast(azureCostReason.value, 'error')
   try {
     await cloudApi.instanceAction(selectedAccountId.value, instance.id, action, getRequestBody(), getInstanceLogTarget(instance))
     toast(`${actionLabel(action)}指令已发送`, 'success')
@@ -1224,12 +1227,17 @@ async function runAction(instance, action) {
 }
 
 async function terminate(instance) {
-  const ok = window.confirm(`确认删除实例「${instance.displayName || instance.id}」吗？此操作不可恢复。`)
+  const cleanupHint = isAzureAccount.value ? '同时删除随实例创建的系统盘、专属网卡和公网 IP；共享或外部资源会保留并提示。' : ''
+  const ok = window.confirm(`确认删除实例「${instance.displayName || instance.id}」吗？${cleanupHint}此操作不可恢复。`)
   if (!ok) return
 
   try {
-    await cloudApi.deleteInstance(selectedAccountId.value, instance.id, getRequestParams(), getInstanceLogTarget(instance))
-    toast('实例删除请求已发送', 'success')
+    const { data } = await cloudApi.deleteInstance(selectedAccountId.value, instance.id, getRequestParams(), getInstanceLogTarget(instance))
+    if (data.cleanup && !data.cleanup.complete) {
+      const details = [...data.cleanup.failed.map(item => `${item.id.split('/').at(-1)}：${item.error}`),
+        ...data.cleanup.retained.map(item => `${item.id.split('/').at(-1)}：${item.reason}`)]
+      window.alert(`实例已删除，以下关联资源尚未清理，可能继续计费：\n${details.join('\n')}`)
+    } else toast(isAzureAccount.value ? '实例及需要随实例删除的资源已清理' : '实例删除请求已发送', 'success')
     await refreshCurrent()
   } catch (error) {
     toast(error.response?.data?.error || error.message, 'error')

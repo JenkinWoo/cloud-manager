@@ -1,6 +1,7 @@
 import { createHash, createPublicKey } from 'crypto'
 import { validateOracleInstancePassword } from '../../utils/oraclePassword.mjs'
 import BaseComputeProvider from './BaseComputeProvider.mjs'
+import { billingNumber, billingTotals, groupBillingRows, withBillingNetworkRetry } from '../../utils/billing.mjs'
 
 let ociSdkPromise = null
 const PAID_COMPUTE_CORE_LIMIT_NAMES = [
@@ -148,6 +149,7 @@ export default class OracleProvider extends BaseComputeProvider {
     this.blockClient = null
     this.identityClient = null
     this.monitoringClient = null
+    this.usageClient = null
     this.limitsClient = null
     this.organizationSubscriptionClient = null
     this.subscriptionClient = null
@@ -188,6 +190,11 @@ export default class OracleProvider extends BaseComputeProvider {
       this.blockClient = new core.BlockstorageClient({ authenticationDetailsProvider: this.provider })
       this.identityClient = new identity.IdentityClient({ authenticationDetailsProvider: this.provider })
       this.monitoringClient = new monitoring.MonitoringClient({ authenticationDetailsProvider: this.provider })
+      this.usageClient = sdk.usageapi?.UsageapiClient
+        ? new sdk.usageapi.UsageapiClient({ authenticationDetailsProvider: this.provider }, {
+          retryConfiguration: sdk.common.NoRetryConfigurationDetails
+        })
+        : null
       this.limitsClient = limits?.LimitsClient
         ? new limits.LimitsClient({ authenticationDetailsProvider: this.provider })
         : null
@@ -292,6 +299,58 @@ export default class OracleProvider extends BaseComputeProvider {
     }
 
     return this._homeRegionId
+  }
+
+  async getBilling({ from, to } = {}) {
+    const now = new Date()
+    const start = from ? new Date(from) : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+    const end = to ? new Date(to) : now
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start >= end) {
+      throw new Error('Oracle 账单时间范围无效')
+    }
+    await this._ensureInitialized()
+    if (!this.usageClient) throw new Error('当前 OCI SDK 不支持 Usage API')
+    this.usageClient.regionId = await this._getHomeRegionId()
+    const requestSummarizedUsagesDetails = {
+      tenantId: this.compartmentId,
+      timeUsageStarted: start,
+      timeUsageEnded: end,
+      granularity: 'DAILY',
+      isAggregateByTime: true,
+      queryType: 'COST',
+      // OCI accepts at most four grouping keys. Currency is returned with cost.
+      groupBy: ['service', 'skuName', 'resourceId', 'unit']
+    }
+    const items = []
+    const seen = new Set()
+    let page
+    do {
+      const response = await withBillingNetworkRetry(() => this.usageClient.requestSummarizedUsages({ requestSummarizedUsagesDetails, limit: 1000, page }))
+      if (!Array.isArray(response.usageAggregation?.items)) throw new Error('Oracle 账单接口未返回明细列表')
+      items.push(...response.usageAggregation.items)
+      page = response.opcNextPage
+      if (page && seen.has(page)) throw new Error('Oracle 账单分页重复，请稍后重试')
+      seen.add(page)
+    } while (page)
+    const services = groupBillingRows(items.map((item) => ({
+      service: item.service || item.skuName || '未知服务',
+      meter: item.skuName || '',
+      resource: item.resourceName || item.resourceId || '',
+      region: item.region || (item.resourceId?.startsWith('ocid1.') ? item.resourceId.split('.')[3] : '') || '',
+      amount: billingNumber(item.computedAmount ?? item.attributedCost),
+      usage: billingNumber(item.computedQuantity ?? item.attributedUsage),
+      unit: item.unit || '',
+      currency: item.currency?.trim() || '',
+      periodStart: item.timeUsageStarted?.toISOString?.() || item.timeUsageStarted || '',
+      periodEnd: item.timeUsageEnded?.toISOString?.() || item.timeUsageEnded || ''
+    })))
+    return {
+      provider: 'oracle',
+      status: 'ok',
+      ...billingTotals(services),
+      services,
+      checkedAt: new Date().toISOString()
+    }
   }
 
   async _setSubscriptionClientsHomeRegion() {

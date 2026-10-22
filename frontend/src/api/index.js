@@ -74,25 +74,25 @@ export const cloudApi = {
   generateInstancePassword: (accountId, config = {}) => api.get(`/cloud/${accountId}/instance-password`, config),
   listInstances: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/instances`, { ...config, params }),
   getInstance: (accountId, instanceId, params = {}, config = {}) =>
-    api.get(`/cloud/${accountId}/instances/${instanceId}`, { ...config, params }),
+    api.get(`/cloud/${accountId}/instances/${encodeURIComponent(instanceId)}`, { ...config, params }),
   createInstance: (accountId, data, logTarget) =>
     api.post(`/cloud/${accountId}/instances`, data, logTargetConfig(logTarget)),
   instanceAction: (accountId, instanceId, action, data = {}, logTarget) =>
-    api.post(`/cloud/${accountId}/instances/${instanceId}/action`, { action, ...data }, logTargetConfig(logTarget)),
+    api.post(`/cloud/${accountId}/instances/${encodeURIComponent(instanceId)}/action`, { action, ...data }, logTargetConfig(logTarget)),
   deleteInstance: (accountId, instanceId, params = {}, logTarget) =>
-    api.delete(`/cloud/${accountId}/instances/${instanceId}`, logTargetConfig(logTarget, { params })),
+    api.delete(`/cloud/${accountId}/instances/${encodeURIComponent(instanceId)}`, logTargetConfig(logTarget, { params })),
   switchIp: (accountId, instanceId, data, logTarget) =>
-    api.post(`/cloud/${accountId}/instances/${instanceId}/switch-ip`, data, logTargetConfig(logTarget)),
+    api.post(`/cloud/${accountId}/instances/${encodeURIComponent(instanceId)}/switch-ip`, data, logTargetConfig(logTarget)),
   addIpv6: (accountId, instanceId, data = {}, logTarget) =>
-    api.post(`/cloud/${accountId}/instances/${instanceId}/add-ipv6`, data, logTargetConfig(logTarget)),
+    api.post(`/cloud/${accountId}/instances/${encodeURIComponent(instanceId)}/add-ipv6`, data, logTargetConfig(logTarget)),
   listElasticIps: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/elastic-ips`, { ...config, params }),
   releaseUnused: (accountId, data = {}) => api.post(`/cloud/${accountId}/elastic-ips/release-unused`, data),
   capabilities: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/capabilities`, { ...config, params }),
   trafficUsage: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/traffic-usage`, { ...config, params }),
   modifyShape: (accountId, instanceId, data, logTarget) =>
-    api.put(`/cloud/${accountId}/instances/${instanceId}/shape`, data, logTargetConfig(logTarget)),
+    api.put(`/cloud/${accountId}/instances/${encodeURIComponent(instanceId)}/shape`, data, logTargetConfig(logTarget)),
   allowAllFirewall: (accountId, instanceId, data = {}, logTarget) =>
-    api.post(`/cloud/${accountId}/instances/${instanceId}/firewall/allow-all`, data, logTargetConfig(logTarget)),
+    api.post(`/cloud/${accountId}/instances/${encodeURIComponent(instanceId)}/firewall/allow-all`, data, logTargetConfig(logTarget)),
   listVolumes: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/volumes`, { ...config, params }),
   resizeVolume: (accountId, volumeId, data, logTarget) =>
     api.put(`/cloud/${accountId}/volumes/${volumeId}/size`, data, logTargetConfig(logTarget)),
@@ -108,6 +108,11 @@ export const cloudApi = {
     api.get(`/cloud/${accountId}/azure/locations`, { ...config, params }),
   listAzureVmSizes: (accountId, params = {}, config = {}) =>
     api.get(`/cloud/${accountId}/azure/vm-sizes`, { ...config, params })
+}
+
+export const billingApi = {
+  listAccounts: (config = {}) => api.get('/billing', config),
+  get: (accountId, params = {}, config = {}) => api.get(`/billing/${encodeURIComponent(accountId)}`, { ...config, params })
 }
 
 export const dnsApi = {

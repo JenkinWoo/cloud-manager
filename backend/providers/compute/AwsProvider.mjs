@@ -18,6 +18,7 @@ import {
   UnassignIpv6AddressesCommand
 } from '@aws-sdk/client-ec2'
 import BaseComputeProvider from './BaseComputeProvider.mjs'
+import { billingNumber, billingTotals, groupBillingRows } from '../../utils/billing.mjs'
 import { validateAwsInstancePassword } from '../../utils/instancePassword.mjs'
 
 let awsSdkPromise = null
@@ -52,6 +53,62 @@ export default class AwsProvider extends BaseComputeProvider {
       r.Instances.map(i => AwsProvider.normalizeInstance(i, this.region))
     )
     return this._attachNetworkUsage(instances)
+  }
+
+  async getBilling({ from, to } = {}) {
+    const now = new Date()
+    const start = from ? new Date(from) : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+    const end = to ? new Date(to) : now
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start >= end) {
+      throw new Error('AWS 账单时间范围无效')
+    }
+    const awsSdk = await loadAwsSdk()
+    const costExplorer = new awsSdk.CostExplorer({
+      region: 'us-east-1',
+      credentials: this.cloudWatchCredentials,
+      httpOptions: { connectTimeout: 10000, timeout: 30000 },
+      maxRetries: 1
+    })
+    const request = {
+      TimePeriod: { Start: start.toISOString().slice(0, 10), End: end.toISOString().slice(0, 10) },
+      Granularity: 'MONTHLY',
+      Metrics: ['UnblendedCost', 'UsageQuantity'],
+      GroupBy: [
+        { Type: 'DIMENSION', Key: 'SERVICE' },
+        { Type: 'DIMENSION', Key: 'USAGE_TYPE' }
+      ]
+    }
+    const periods = []
+    const seen = new Set()
+    let nextToken
+    do {
+      const result = await costExplorer.getCostAndUsage({ ...request, NextPageToken: nextToken }).promise()
+      if (!Array.isArray(result.ResultsByTime)) throw new Error('AWS 未返回账单数据')
+      periods.push(...result.ResultsByTime)
+      nextToken = result.NextPageToken
+      if (nextToken && seen.has(nextToken)) throw new Error('AWS 账单分页重复，请稍后重试')
+      seen.add(nextToken)
+    } while (nextToken)
+    const services = groupBillingRows(periods.flatMap((period) =>
+      (period.Groups || []).map((group) => ({
+        service: group.Keys?.[0] || '未知服务',
+        meter: group.Keys?.[1] || '',
+        amount: billingNumber(group.Metrics?.UnblendedCost?.Amount),
+        usage: billingNumber(group.Metrics?.UsageQuantity?.Amount),
+        unit: group.Metrics?.UsageQuantity?.Unit || '',
+        currency: group.Metrics?.UnblendedCost?.Unit || '',
+        periodStart: period.TimePeriod?.Start || null,
+        periodEnd: period.TimePeriod?.End || null
+      }))
+    ))
+    return {
+      provider: 'aws',
+      status: 'ok',
+      ...billingTotals(services),
+      estimated: periods.some(period => period.Estimated),
+      services,
+      checkedAt: new Date().toISOString()
+    }
   }
 
   async getInstance(instanceId) {

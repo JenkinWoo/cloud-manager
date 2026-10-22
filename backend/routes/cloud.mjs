@@ -5,6 +5,7 @@ import { createTask } from '../queue.mjs'
 import { getCurrentMonthPeriod, syncTrafficUsage } from '../services/trafficUsage.mjs'
 import { validateOracleInstancePassword } from '../utils/oraclePassword.mjs'
 import { generateInstancePassword, validateAwsInstancePassword } from '../utils/instancePassword.mjs'
+import { AZURE_COST_POLICY, validateAzureFreeCreateParams } from '../utils/azureCostPolicy.mjs'
 
 const router = Router({ mergeParams: true })
 const READ_TIMEOUT_MS = Number(process.env.CLOUD_READ_TIMEOUT_MS || 8000)
@@ -152,7 +153,8 @@ router.get('/capabilities', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
     const provider = getScopedProvider(account, req)
-    res.json({ provider: account.computeProvider, capabilities: provider.constructor.capabilities || [] })
+    res.json({ provider: account.computeProvider, capabilities: provider.constructor.capabilities || [],
+      ...(account.computeProvider === 'azure' ? { costPolicy: AZURE_COST_POLICY } : {}) })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -264,6 +266,7 @@ router.post('/instances', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
     const { delay = 60, ...params } = req.body
+    if (account.computeProvider === 'azure') validateAzureFreeCreateParams(params)
 
     if (account.computeProvider === 'oracle') {
       validateOracleInstancePassword(params.rootPassword)
@@ -284,7 +287,7 @@ router.post('/instances', async (req, res) => {
 
     res.status(202).json({ taskId: task.id, message: '创建任务已加入队列' })
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    res.status(err.statusCode === 403 ? 403 : 500).json({ error: err.message, code: err.code })
   }
 })
 
@@ -295,7 +298,7 @@ router.post('/instances/:instanceId/action', async (req, res) => {
     const { action = 'START' } = req.body
     res.json({ success: true, ...(await provider.instanceAction(req.params.instanceId, action)) })
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    res.status(err.statusCode === 403 ? 403 : 500).json({ error: err.message, code: err.code })
   }
 })
 

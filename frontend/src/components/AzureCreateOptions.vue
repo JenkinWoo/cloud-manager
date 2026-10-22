@@ -1,23 +1,21 @@
 <template>
-  <section class="azure-options" aria-label="免费候选组合">
+  <section class="azure-options" aria-label="免费额度实例推荐">
     <div class="options-heading">
-      <strong>当前订阅的免费候选组合</strong>
+      <strong>当前订阅的免费额度实例推荐</strong>
       <button type="button" class="btn btn-ghost btn-sm" :disabled="loading || disabled" @click="load">刷新推荐</button>
     </div>
-    <p v-if="loading" class="form-hint" role="status">正在检查允许区域的规格、CPU 和公网 IP 配额…</p>
+    <p v-if="loading" class="form-hint" role="status">正在检查免费额度规格、允许区域及 CPU 配额…</p>
     <p v-else-if="error" class="form-hint" role="alert">{{ error }}</p>
     <template v-else-if="result">
-      <p class="form-hint">检查时间：{{ new Date(result.checkedAt).toLocaleString() }}。预检通过不保证实时容量或最终免费权益。</p>
-      <p v-if="!result.options.length" class="form-hint">本次没有预检通过的组合，请查看各区域原因或刷新重试。</p>
+      <p class="form-hint">检查时间：{{ new Date(result.checkedAt).toLocaleString() }}。</p>
+      <p v-if="!result.options.length" class="form-hint">当前没有通过规格和配额检查的组合，请查看区域原因或刷新重试。</p>
       <ul v-else class="options-list">
         <li v-for="option in result.options" :key="`${option.location}/${option.vmSize}`">
           <div>
-            <strong>{{ option.displayName }} ({{ option.location }}) · {{ option.vmSize }}</strong>
-            <p v-if="option.publicIpQuota?.freeMode" class="form-hint">免费模式：不会创建公网 IP</p>
-            <p v-if="!option.publicIpQuota?.freeMode" class="form-hint">{{ option.numberOfCores }} vCPU · {{ option.memoryInMB / 1024 }} GB；剩余 CPU {{ option.cpuQuota.remainingCores }} 核，公网 IP {{ option.publicIpQuota.remainingAddresses }} 个</p>
-            <p v-else class="form-hint">{{ option.numberOfCores }} vCPU · {{ option.memoryInMB / 1024 }} GB；剩余 CPU {{ option.cpuQuota.remainingCores }} 核</p>
+            <strong>{{ option.displayName }} ({{ option.location }}) · {{ option.vmSize }} · {{ option.architecture }}</strong>
+            <p class="form-hint">{{ option.numberOfCores }} vCPU · {{ option.memoryInMB / 1024 }} GB；剩余 CPU {{ option.cpuQuota.remainingCores }} 核 · 64 GiB P6 系统盘 · 私网</p>
           </div>
-          <button type="button" class="btn btn-ghost btn-sm" :disabled="disabled" @click="emit('select', option)">选择</button>
+          <button type="button" class="btn btn-ghost btn-sm" :disabled="disabled || result.costPolicy?.creationAllowed !== true" @click="emit('select', option)">选择</button>
         </li>
       </ul>
       <details v-if="result.regions.some(region => region.status !== 'ready' || region.sizes.some(size => !size.available))">

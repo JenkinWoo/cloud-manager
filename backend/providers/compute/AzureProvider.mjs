@@ -1,22 +1,23 @@
 import axios from 'axios'
 import { createHash, randomUUID } from 'node:crypto'
+import { billingNumber, billingTotals, groupBillingRows } from '../../utils/billing.mjs'
 import BaseComputeProvider from './BaseComputeProvider.mjs'
 import { normalizeAzureCredentials } from '../../utils/azureCredentials.mjs'
 import { isAzureResourceGroupLocationError, withAzureNetworkRetry } from '../../utils/azureRequest.mjs'
 import { getAzureVmQuota } from '../../utils/azureVmQuota.mjs'
 import { getAzurePublicIpQuota } from '../../utils/azurePublicIpQuota.mjs'
+import { AZURE_COST_POLICY, AZURE_FREE_VM_PROFILES, getAzureFreeVmProfile, validateAzureFreeCreateParams,
+  assertAzureFreeSubscription, azureFreeOnlyError, withAzureAllocationLock } from '../../utils/azureCostPolicy.mjs'
 
 let azureSdkPromise = null
 const azureBillingCache = new Map()
+const azureVmChargeCache = new Map()
 const AZURE_MONITOR_METRICS_API_VERSION = '2018-01-01'
 const DISPLAY_NAME_TAG = 'cloud-manager-display-name'
 const VM_RESOURCE_PROVIDERS = ['Microsoft.Network', 'Microsoft.Compute']
 const PROVIDER_REGISTRATION_TIMEOUT_MS = 120000
 const PROVIDER_REGISTRATION_POLL_MS = 5000
-const AZURE_FREE_ONLY = !['0', 'false', 'off', 'no'].includes(String(process.env.AZURE_FREE_ONLY || 'true').trim().toLowerCase())
-// https://azure.microsoft.com/en-us/free/ — free allowance SKUs, not billing entitlement.
-// B2pts_v2 uses Arm and is incompatible with the default Ubuntu x64 image.
-const AZURE_FREE_TIER_X64_VM_SIZES = new Set(['Standard_B1s', 'Standard_B2ats_v2'])
+const AZURE_FREE_TIER_VM_SIZES = new Set(Object.keys(AZURE_FREE_VM_PROFILES))
 
 function safeName(input, fallback = 'cloud-manager') {
   const cleaned = String(input || '')
@@ -26,10 +27,6 @@ function safeName(input, fallback = 'cloud-manager') {
     .replace(/^-|-$/g, '')
 
   return (cleaned || fallback).slice(0, 50)
-}
-
-function randomSuffix(length = 6) {
-  return Math.random().toString(36).slice(2, 2 + length)
 }
 
 function parseAzureResourceId(id = '') {
@@ -133,7 +130,6 @@ export default class AzureProvider extends BaseComputeProvider {
   static providerName = 'azure'
   static get capabilities() {
     return [
-      ...(AZURE_FREE_ONLY ? [] : ['switch_ip', 'switch_ipv6']),
       'allow_all_inbound_traffic',
       'rename_instance',
       'manage_public_ips'
@@ -354,6 +350,86 @@ export default class AzureProvider extends BaseComputeProvider {
     return billing
   }
 
+  async _billingArmGet(path, apiVersion) {
+    return withAzureNetworkRetry('读取账单', () => this._armGet(path, apiVersion))
+  }
+
+  async _billingNextPage(nextLink) {
+    const url = new URL(nextLink, 'https://management.azure.com')
+    if (url.origin !== 'https://management.azure.com') throw new Error('Azure 返回了无效的账单分页地址')
+    const version = url.searchParams.get('api-version') || '2024-08-01'
+    url.searchParams.delete('api-version')
+    return this._billingArmGet(url.pathname + url.search, version)
+  }
+
+  async _getUsageBilling(subscriptionId, { from, to }) {
+    const end = new Date(Math.min(new Date(to).getTime() - 1, Date.now()))
+    const filter = "properties/usageStart ge '" + from.slice(0, 10) + "' and properties/usageEnd le '" + end.toISOString().slice(0, 10) + "'"
+    let response = await this._billingArmGet('/subscriptions/' + subscriptionId + '/providers/Microsoft.Consumption/usageDetails?$top=1000&$expand=meterDetails&$filter=' + encodeURIComponent(filter), '2024-08-01')
+    const rows = []
+    const seen = new Set()
+    while (true) {
+      if (!Array.isArray(response.value)) throw new Error('Azure 未返回用量明细列表')
+      for (const item of response.value) {
+        const p = item.properties || {}
+        const meter = p.meterDetails || {}
+        const date = p.date || p.usageStart
+        // The legacy endpoint may return records outside the requested month.
+        if (date && (new Date(date) < new Date(from) || new Date(date) >= new Date(to))) continue
+        const amount = billingNumber(p.costInBillingCurrency ?? p.pretaxCost)
+        if (amount === null) throw new Error('Azure 用量明细缺少计费金额')
+        rows.push({
+          service: p.meterCategory || meter.meterCategory || p.consumedService || '未知服务',
+          meter: p.meterName || meter.meterName || p.product || '',
+          resource: p.resourceId || p.instanceName || p.resourceName || '',
+          region: p.resourceLocation || p.instanceLocation || meter.meterLocation || '',
+          amount, currency: p.billingCurrencyCode || p.billingCurrency || p.currency || '',
+          usage: billingNumber(p.quantity), unit: p.unitOfMeasure || meter.unitOfMeasure || '',
+          unitPrice: billingNumber(p.effectivePrice ?? p.unitPrice), chargeType: p.chargeType || '',
+          periodStart: date || '', periodEnd: p.date || p.usageEnd || date || ''
+        })
+      }
+      if (!response.nextLink) break
+      if (seen.has(response.nextLink)) throw new Error('Azure 账单分页重复，请稍后重试')
+      seen.add(response.nextLink)
+      response = await this._billingNextPage(response.nextLink)
+    }
+    const services = groupBillingRows(rows)
+    return { services, ...billingTotals(services) }
+  }
+
+  async getBilling(options = {}) {
+    const subscriptions = []
+    let response = await this._billingArmGet('/subscriptions', '2020-01-01')
+    const seen = new Set()
+    while (true) {
+      if (!Array.isArray(response.value)) throw new Error('Azure 未返回订阅列表')
+      subscriptions.push(...response.value)
+      if (!response.nextLink) break
+      if (seen.has(response.nextLink)) throw new Error('Azure 订阅分页重复')
+      seen.add(response.nextLink)
+      response = await this._billingNextPage(response.nextLink)
+    }
+    const results = []
+    // Query only this account's subscriptions; preserve successful results if one fails.
+    for (const subscription of subscriptions) {
+      const base = { subscriptionId: subscription.subscriptionId, subscriptionName: subscription.displayName || subscription.subscriptionId }
+      try {
+        results.push({ ...base, status: 'ok', ...await this._getUsageBilling(subscription.subscriptionId, options) })
+      } catch (error) {
+        results.push({ ...base, status: 'error', total: null, totals: [], services: [], error: error.cause?.response?.data?.error?.message || error.response?.data?.error?.message || error.message })
+      }
+    }
+    const services = results.flatMap(item => item.services.map(row => ({ ...row, subscriptionName: item.subscriptionName })))
+    const failures = results.filter(item => item.status === 'error')
+    return {
+      provider: 'azure', status: failures.length ? (failures.length === results.length ? 'error' : 'partial') : 'ok',
+      ...billingTotals(services), ...(failures.length ? { total: null } : {}),
+      error: failures.map(item => item.subscriptionName + '：' + item.error).join('；'),
+      subscriptions: results, services, checkedAt: new Date().toISOString()
+    }
+  }
+
   async _resolveSubscription(requestedSubscriptionId = this.selectedSubscriptionId) {
     const subscriptions = await this._listSubscriptions()
     const enabledSubscriptions = subscriptions.filter((item) => String(item.state || '').toLowerCase() === 'enabled')
@@ -390,6 +466,7 @@ export default class AzureProvider extends BaseComputeProvider {
       const subscription = await this._resolveSubscription()
       this.subscriptionId = subscription.subscriptionId
       this.subscriptionName = subscription.displayName || subscription.subscriptionId
+      this.subscription = subscription
 
       this.computeClient = new ComputeManagementClient(this.credential, this.subscriptionId)
       this.networkClient = new NetworkManagementClient(this.credential, this.subscriptionId)
@@ -536,6 +613,10 @@ export default class AzureProvider extends BaseComputeProvider {
         code: quota.sufficient === false ? 'QuotaExceeded' : 'QuotaInformationUnavailable', retryable: false
       })
     }
+    if (capabilityValue(sku, 'PremiumIO').toLowerCase() !== 'true') {
+      throw azureFreeOnlyError('此规格不支持 P6 系统盘，请选择支持 Premium SSD 的规格')
+    }
+    return sku
   }
 
   async listVmSizes(location, subscriptionId) {
@@ -547,8 +628,38 @@ export default class AzureProvider extends BaseComputeProvider {
     await this._ensureCredential()
 
     const subscription = await this._resolveSubscription(subscriptionId)
+    assertAzureFreeSubscription(subscription)
     const client = new ComputeManagementClient(this.credential, subscription.subscriptionId)
-    return this._listVmSizes(client, location)
+    const [sizes, charges] = await Promise.all([
+      this._listVmSizes(client, location), this._getFreeVmCharges(subscription.subscriptionId)
+    ])
+    return this._applyVmCharges(sizes, location, charges)
+  }
+
+  async _getFreeVmCharges(subscriptionId, refresh = false) {
+    const now = new Date()
+    const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString()
+    const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString()
+    const key = `${this.credentials.tenant}/${this.credentials.appId}/${subscriptionId}/${from}`
+    const cached = azureVmChargeCache.get(key)
+    if (!refresh && cached && Date.now() - cached.at < 60000) return cached.charges
+    try {
+      const result = await this._getUsageBilling(subscriptionId, { from, to })
+      const normalize = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+      const charges = result.services.filter(row => row.amount > 0 && /virtual machines|microsoft.compute/i.test(row.service))
+        .flatMap(row => [...AZURE_FREE_TIER_VM_SIZES].filter(size => normalize(row.meter) === normalize(size.replace('Standard_', '')))
+          .map(vmSize => ({ vmSize, location: normalize(row.region) })))
+      azureVmChargeCache.set(key, { at: Date.now(), charges })
+      return charges
+    } catch (error) {
+      throw Object.assign(new Error(`无法检查本月虚拟机计费记录，请刷新后重试：${error.message}`), { retryable: false })
+    }
+  }
+
+  _applyVmCharges(sizes, location, charges) {
+    return sizes.map(size => charges.some(row => row.vmSize === size.name && row.location === location.toLowerCase())
+      ? { ...size, available: false, restrictionReason: '本月此区域和规格已有实际计算费用，免费模式不允许继续创建' }
+      : size)
   }
 
   async _listVmSizes(client, location, options = {}) {
@@ -560,16 +671,18 @@ export default class AzureProvider extends BaseComputeProvider {
     // Resource SKUs is the subscription-specific source. Intersecting it with
     // the legacy VM sizes endpoint can drop current-generation VM sizes.
     for (const item of regionalSkus) {
-      if (!item.name) continue
-      const architecture = capabilityValue(item, 'CpuArchitectureType').toLowerCase()
-      if ((architecture && architecture !== 'x64') || item.name === 'Standard_B2pts_v2') continue
+      if (!AZURE_FREE_TIER_VM_SIZES.has(item.name)) continue
+      const profile = getAzureFreeVmProfile(item.name)
+      const architecture = capabilityValue(item, 'CpuArchitectureType') || profile.architecture
+      if (architecture.toLowerCase() !== profile.architecture.toLowerCase()) continue
       const generations = capabilityValue(item, 'HyperVGenerations')
       if (generations && !generations.split(',').some((value) => value.trim().toUpperCase() === 'V2')) continue
       const numberOfCores = Number(capabilityValue(item, 'vCPUs')) || null
       const memoryGb = Number(capabilityValue(item, 'MemoryGB')) || null
       const regionAvailable = AzureProvider.isVmSkuAvailable(item, location)
       const quota = getAzureVmQuota(item, usages)
-      const available = regionAvailable && quota.sufficient === true
+      const premiumDiskSupported = capabilityValue(item, 'PremiumIO').toLowerCase() === 'true'
+      const available = regionAvailable && quota.sufficient === true && premiumDiskSupported
       sizes.push({
         name: item.name,
         numberOfCores,
@@ -577,9 +690,10 @@ export default class AzureProvider extends BaseComputeProvider {
         available,
         family: item.family,
         quota,
-        freeTierCandidate: AZURE_FREE_TIER_X64_VM_SIZES.has(item.name),
-        restrictionReason: !regionAvailable ? '当前订阅在此区域受限' : quota.reason,
-        label: `${item.name} · ${numberOfCores ?? '?'} vCPU · ${memoryGb ?? '?'} GB`
+        freeTierCandidate: true,
+        architecture: profile.architecture,
+        restrictionReason: !regionAvailable ? '当前订阅在此区域受限' : !premiumDiskSupported ? '不支持 P6 系统盘' : quota.reason,
+        label: `${item.name} · ${profile.architecture} · ${numberOfCores ?? '?'} vCPU · ${memoryGb ?? '?'} GB`
       })
     }
 
@@ -601,47 +715,35 @@ export default class AzureProvider extends BaseComputeProvider {
     }
     this.useSubscription(subscriptionId.trim())
     await this._ensureInitialized()
-    const locations = await this.listLocations(this.subscriptionId)
+    assertAzureFreeSubscription(this.subscription)
+    const [locations, charges] = await Promise.all([
+      this.listLocations(this.subscriptionId), this._getFreeVmCharges(this.subscriptionId)
+    ])
     const regions = []
     let cursor = 0
-    // Reuse subscription-scoped clients with at most three regional scans in flight.
     await Promise.all(Array.from({ length: Math.min(3, locations.length) }, async () => {
       while (cursor < locations.length) {
         const location = locations[cursor++]
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), 30000)
         try {
-          const requestOptions = { abortSignal: controller.signal }
-          const [allSizes, usages] = await Promise.all([
-            this._listVmSizes(this.computeClient, location.name, requestOptions),
-            AZURE_FREE_ONLY ? Promise.resolve([]) : this._listNetworkUsage(this.networkClient, location.name, requestOptions)
-          ])
-          const sizes = allSizes.filter(size => size.freeTierCandidate)
-          const publicIpQuota = AZURE_FREE_ONLY
-            ? { sufficient: true, remainingAddresses: null, freeMode: true, reason: '免费模式不会创建公网 IP' }
-            : getAzurePublicIpQuota(usages)
-          const ready = (AZURE_FREE_ONLY || publicIpQuota.sufficient === true) && sizes.some(size => size.available)
-          const unknown = !AZURE_FREE_ONLY && (publicIpQuota.sufficient === null || sizes.some(size => size.quota.sufficient === null))
-          regions.push({ location: location.name, displayName: location.displayName,
-            sizes, publicIpQuota, status: ready ? 'ready' : unknown ? 'unknown' : 'blocked',
-            reason: publicIpQuota.reason || (sizes.length ? '' : '此区域没有兼容的 x64 免费候选规格') })
+          const sizes = this._applyVmCharges(await this._listVmSizes(this.computeClient, location.name, { abortSignal: controller.signal }), location.name, charges)
+          regions.push({ location: location.name, displayName: location.displayName, sizes,
+            status: sizes.some(size => size.available) ? 'ready' : 'blocked',
+            reason: sizes.length ? '' : '此区域没有可用的免费额度规格' })
         } catch (error) {
           regions.push({ location: location.name, displayName: location.displayName, sizes: [], status: 'unknown',
             reason: controller.signal.aborted ? '区域查询超时，请刷新重试' : error.message })
-        } finally {
-          clearTimeout(timer)
-          controller.abort()
-        }
+        } finally { clearTimeout(timer) }
       }
     }))
     regions.sort((a, b) => a.location.localeCompare(b.location))
-    const options = regions.flatMap(region => region.status === 'ready'
-      ? region.sizes.filter(size => size.available).sort((a, b) => a.name.localeCompare(b.name)).map(size => ({
-        location: region.location, displayName: region.displayName, vmSize: size.name,
-        numberOfCores: size.numberOfCores, memoryInMB: size.memoryInMB,
-        cpuQuota: size.quota, publicIpQuota: region.publicIpQuota
-      })) : [])
-    return { subscriptionId: this.subscriptionId, checkedAt: new Date().toISOString(), options, regions }
+    const options = regions.flatMap(region => region.sizes.filter(size => size.available).map(size => ({
+      location: region.location, displayName: region.displayName, vmSize: size.name, architecture: size.architecture,
+      numberOfCores: size.numberOfCores, memoryInMB: size.memoryInMB, cpuQuota: size.quota,
+      publicIpQuota: { freeMode: true }, osDisk: AZURE_COST_POLICY.osDisk
+    })))
+    return { subscriptionId: this.subscriptionId, checkedAt: new Date().toISOString(), options, regions, costPolicy: AZURE_COST_POLICY }
   }
 
   async _assertLocationAllowed(location) {
@@ -788,6 +890,7 @@ export default class AzureProvider extends BaseComputeProvider {
 
     return this.networkClient.subnets.beginCreateOrUpdateAndWait(resourceGroupName, virtualNetworkName, subnetName, {
       addressPrefix: '10.30.1.0/24',
+      defaultOutboundAccess: false,
       networkSecurityGroup: networkSecurityGroupId ? { id: networkSecurityGroupId } : undefined
     })
   }
@@ -979,128 +1082,74 @@ export default class AzureProvider extends BaseComputeProvider {
     })
   }
 
-  async createInstance(params, context = {}) {
+  async _assertFreeInventory(vmSize, { vmId = '', diskId = '' } = {}) {
+    // Bound simultaneous allocations across all regions, including resources
+    // created outside this app. These limits do not reset historical usage.
+    for await (const vm of this.computeClient.virtualMachines.listAll()) {
+      if (vm.id?.toLowerCase() !== vmId.toLowerCase() && vm.hardwareProfile?.vmSize === vmSize) {
+        throw azureFreeOnlyError(`订阅中已有 ${vmSize} 实例；为避免共享的每月 750 小时额度超额，不再创建同规格实例`)
+      }
+    }
+    let disks = 0
+    for await (const disk of this.computeClient.disks.list()) {
+      if (disk.id?.toLowerCase() === diskId.toLowerCase()) continue
+      if (disk.sku?.name === 'Premium_LRS' && (disk.tier === 'P6' || (disk.diskSizeGB > 32 && disk.diskSizeGB <= 64))) disks++
+    }
+    if (disks >= 2) throw azureFreeOnlyError('订阅中已有两块 P6 系统盘或数据盘，不能再占用免费磁盘额度')
+  }
+
+  async createInstance(params = {}, context = {}) {
+    // Validate both direct requests and restored queue jobs before any write.
+    const config = validateAzureFreeCreateParams(params)
+    if (!params.adminPassword) throw Object.assign(new Error('Azure 实例创建需要 adminPassword'), { retryable: false })
     this.useSubscription(params.subscriptionId)
     await withAzureNetworkRetry('初始化订阅和身份认证', () => this._ensureInitialized())
-
-    const location = params.location || 'eastasia'
-    const vmSize = params.vmSize || 'Standard_B1s'
-    const adminUsername = params.adminUsername || 'azureuser'
-    const adminPassword = params.adminPassword
-
-    if (!adminPassword) {
-      throw new Error('Azure 实例创建需要 adminPassword')
-    }
-
-    const imagePublisher = params.imagePublisher || 'Canonical'
-    const imageOffer = params.imageOffer || '0001-com-ubuntu-server-jammy'
-    const imageSku = params.imageSku || '22_04-lts-gen2'
-    const imageVersion = params.imageVersion || 'latest'
-
-    if (AZURE_FREE_ONLY && !AZURE_FREE_TIER_X64_VM_SIZES.has(vmSize)) {
-      throw Object.assign(new Error(`免费模式仅允许使用 ${[...AZURE_FREE_TIER_X64_VM_SIZES].join(' / ')} VM 规格`), {
-        code: 'FreeOnlyMode',
-        retryable: false
-      })
-    }
-
-    const creationId = context.creationId || randomUUID()
-    const vmName = `cm-${createHash('sha256').update(creationId).digest('hex').slice(0, 32)}`
-    await withAzureNetworkRetry('检查资源提供程序注册', () => this._ensureResourceProvidersRegistered())
-    if (context.creationId) {
-      const existing = await withAzureNetworkRetry('检查已有实例', async () => {
-        try {
-          return await this.computeClient.virtualMachines.get(this._defaultResourceGroupName(), vmName)
-        } catch (error) {
-          if (error.statusCode === 404) return null
-          throw error
+    assertAzureFreeSubscription(this.subscription)
+    return withAzureAllocationLock(this.subscriptionId, async () => {
+      const location = params.location || 'eastasia'
+      const creationId = context.creationId || randomUUID()
+      const vmName = `cm-${createHash('sha256').update(creationId).digest('hex').slice(0, 32)}`
+      const resourceGroup = this._defaultResourceGroupName()
+      const vmId = `/subscriptions/${this.subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}`
+      let existing
+      try { existing = await this.computeClient.virtualMachines.get(resourceGroup, vmName) }
+      catch (error) { if (error.statusCode !== 404) throw error }
+      if (existing) {
+        if (existing.tags?.managedBy !== 'cloud-manager' || existing.hardwareProfile?.vmSize !== config.vmSize ||
+            existing.storageProfile?.osDisk?.managedDisk?.storageAccountType !== 'Premium_LRS' ||
+            existing.storageProfile?.osDisk?.diskSizeGB !== 64) {
+          throw azureFreeOnlyError('此任务已有不符合当前免费配置的实例，请先检查并清理原资源')
         }
-      })
-      // A previous create response may have been lost after deployment succeeded.
-      // Its CPU usage must not make the same task fail its fresh quota check.
-      if (existing?.provisioningState === 'Succeeded') {
-        return { instanceId: existing.id, displayName: existing.tags?.[DISPLAY_NAME_TAG] || existing.name || vmName }
+        if (existing.provisioningState === 'Succeeded') return { instanceId: existing.id, displayName: existing.name }
       }
-    }
-
-    const nicName = `${vmName}-nic`
-    await withAzureNetworkRetry('检查订阅区域策略', () => this._assertLocationAllowed(location))
-    // Check current quota before allocating network or VM resources.
-    await withAzureNetworkRetry('检查实例规格可用性', () => this._assertVmSizeAvailable(location, vmSize))
-    const publicIpName = `${vmName}-pip`
-    const existingPublicIp = AZURE_FREE_ONLY
-      ? null
-      : await withAzureNetworkRetry('检查公网 IP 配额', () => this._assertPublicIpCapacity(location, publicIpName, vmName))
-    const network = await this._ensureDefaultNetwork(location)
-    // The task ID survives retries and restarts. Never generate another set of
-    // resources merely because Azure accepted a PUT but its response was lost.
-    const publicIp = AZURE_FREE_ONLY
-      ? null
-      : existingPublicIp || await withAzureNetworkRetry('创建公网 IP', () => this.networkClient.publicIPAddresses.beginCreateOrUpdateAndWait(network.resourceGroupName, publicIpName, {
-        location,
-        publicIPAllocationMethod: 'Static',
-        publicIPAddressVersion: 'IPv4',
-        sku: { name: 'Standard' },
-        tags: { managedBy: 'cloud-manager', vmName }
-      }))
-
-    const nic = await withAzureNetworkRetry('创建网卡', () => this.networkClient.networkInterfaces.beginCreateOrUpdateAndWait(network.resourceGroupName, nicName, {
-      location,
-      tags: { managedBy: 'cloud-manager', vmName },
-      networkSecurityGroup: network.networkSecurityGroup?.id ? { id: network.networkSecurityGroup.id } : undefined,
-      ipConfigurations: [
-        {
-          name: 'ipconfig1',
-          subnet: { id: network.subnet.id },
-          privateIPAllocationMethod: 'Dynamic',
-          ...(publicIp ? { publicIPAddress: { id: publicIp.id } } : {}),
-          primary: true
-        }
-      ]
-    }))
-
-    const vm = await withAzureNetworkRetry('创建虚拟机', () => this.computeClient.virtualMachines.beginCreateOrUpdateAndWait(network.resourceGroupName, vmName, {
-      location,
-      tags: { managedBy: 'cloud-manager' },
-      hardwareProfile: { vmSize },
-      osProfile: {
-        computerName: vmName,
-        adminUsername,
-        adminPassword,
-        linuxConfiguration: {
-          disablePasswordAuthentication: false
-        }
-      },
-      storageProfile: {
-        imageReference: {
-          publisher: imagePublisher,
-          offer: imageOffer,
-          sku: imageSku,
-          version: imageVersion
-        },
-        osDisk: {
-          createOption: 'FromImage',
-          deleteOption: 'Delete',
-          managedDisk: {
-            storageAccountType: 'Standard_LRS'
-          }
-        }
-      },
-      networkProfile: {
-        networkInterfaces: [
-          {
-            id: nic.id,
-            primary: true,
-            deleteOption: 'Delete'
-          }
-        ]
+      await this._assertFreeInventory(config.vmSize, { vmId, diskId: existing?.storageProfile?.osDisk?.managedDisk?.id })
+      const charges = await this._getFreeVmCharges(this.subscriptionId, true)
+      if (this._applyVmCharges([{ name: config.vmSize, available: true }], location, charges)[0].available === false) {
+        throw azureFreeOnlyError('本月此区域和规格已有实际计算费用，请选择其他免费额度组合')
       }
-    }))
-
-    return {
-      instanceId: vm.id,
-      displayName: vm.name || vmName
-    }
+      await withAzureNetworkRetry('检查订阅区域策略', () => this._assertLocationAllowed(location))
+      await withAzureNetworkRetry('检查实例规格可用性', () => this._assertVmSizeAvailable(location, config.vmSize))
+      await withAzureNetworkRetry('检查资源提供程序注册', () => this._ensureResourceProvidersRegistered())
+      const network = await this._ensureDefaultNetwork(location)
+      const nic = await withAzureNetworkRetry('创建网卡', () => this.networkClient.networkInterfaces.beginCreateOrUpdateAndWait(
+        network.resourceGroupName, `${vmName}-nic`, {
+          location, tags: { managedBy: 'cloud-manager', vmName },
+          networkSecurityGroup: { id: network.networkSecurityGroup.id },
+          ipConfigurations: [{ name: 'ipconfig1', subnet: { id: network.subnet.id }, privateIPAllocationMethod: 'Dynamic', primary: true }]
+        }))
+      const vm = await withAzureNetworkRetry('创建虚拟机', () => this.computeClient.virtualMachines.beginCreateOrUpdateAndWait(
+        network.resourceGroupName, vmName, {
+          location, tags: { managedBy: 'cloud-manager' }, hardwareProfile: { vmSize: config.vmSize },
+          osProfile: { computerName: vmName, adminUsername: params.adminUsername || 'azureuser', adminPassword: params.adminPassword,
+            linuxConfiguration: { disablePasswordAuthentication: false } },
+          storageProfile: { imageReference: config.image,
+            osDisk: { name: `${vmName}-os`, createOption: 'FromImage', deleteOption: 'Delete', diskSizeGB: 64,
+              managedDisk: { storageAccountType: 'Premium_LRS' } } },
+          diagnosticsProfile: { bootDiagnostics: { enabled: false } },
+          networkProfile: { networkInterfaces: [{ id: nic.id, primary: true, deleteOption: 'Delete' }] }
+        }))
+      return { instanceId: vm.id, displayName: vm.name || vmName }
+    })
   }
 
   static normalizePublicIp(raw) {
@@ -1112,6 +1161,9 @@ export default class AzureProvider extends BaseComputeProvider {
       name: raw.name,
       ipAddress: raw.ipAddress || '',
       version: raw.publicIPAddressVersion || '',
+      sku: raw.sku?.name || '',
+      allocationMethod: raw.publicIPAllocationMethod || '',
+      tier: raw.sku?.tier || '',
       region: raw.location,
       resourceGroup: parseAzureResourceId(raw.id).resourceGroup,
       state,
@@ -1227,34 +1279,97 @@ export default class AzureProvider extends BaseComputeProvider {
     return { instanceId, displayName }
   }
 
+  _validateResourceId(id, provider, type) {
+    const parsed = parseAzureResourceId(id)
+    if (parsed.parts.length !== 8 || !parsed.resourceGroup || !parsed.resourceName ||
+        parsed.subscriptionId.toLowerCase() !== this.subscriptionId?.toLowerCase() ||
+        parsed.provider.toLowerCase() !== provider.toLowerCase() || parsed.resourceType.toLowerCase() !== type.toLowerCase()) {
+      throw Object.assign(new Error(`无法识别当前订阅的 Azure ${type} ID: ${id}`), { statusCode: 400 })
+    }
+    return parsed
+  }
+
   async deleteInstance(instanceId) {
     await this._ensureInitialized()
-    const parsed = parseAzureResourceId(instanceId)
-    if (!parsed.resourceGroup || !parsed.resourceName) {
-      throw new Error(`无法识别 Azure 实例 ID: ${instanceId}`)
+    const parsed = this._validateResourceId(instanceId, 'Microsoft.Compute', 'virtualMachines')
+    const vm = await this.computeClient.virtualMachines.get(parsed.resourceGroup, parsed.resourceName)
+    const owned = vm.tags?.managedBy === 'cloud-manager'
+    const candidates = new Map()
+    const retained = []
+    const add = (kind, id) => { if (id) candidates.set(id.toLowerCase(), { kind, id }) }
+    const osDisk = vm.storageProfile?.osDisk
+    const disks = [osDisk, ...(vm.storageProfile?.dataDisks || [])].filter(Boolean)
+    for (const disk of disks) {
+      if (!disk.managedDisk?.id) continue
+      this._validateResourceId(disk.managedDisk.id, 'Microsoft.Compute', 'disks')
+      if (disk.deleteOption === 'Delete' || (owned && disk === osDisk && disk.createOption === 'FromImage')) {
+        add('disk', disk.managedDisk.id)
+      } else retained.push({ id: disk.managedDisk.id, reason: '保留未声明随实例删除的磁盘，仍可能产生存储费用' })
+    }
+    // Collect dependencies before VM deletion cascades to the NIC and OS disk.
+    for (const ref of vm.networkProfile?.networkInterfaces || []) {
+      const nicParsed = this._validateResourceId(ref.id, 'Microsoft.Network', 'networkInterfaces')
+      const nic = await this.networkClient.networkInterfaces.get(nicParsed.resourceGroup, nicParsed.resourceName)
+      if (ref.deleteOption !== 'Delete' && !(owned && nic.tags?.managedBy === 'cloud-manager' && nic.tags?.vmName === vm.name)) {
+        retained.push({ id: ref.id, reason: '保留非本实例专属网卡及其关联资源' })
+        continue
+      }
+      add('nic', ref.id)
+      for (const config of nic.ipConfigurations || []) {
+        const id = config.publicIPAddress?.id
+        if (!id) continue
+        this._validateResourceId(id, 'Microsoft.Network', 'publicIPAddresses')
+        const ip = await this._getPublicIpById(id)
+        if (ip.tags?.managedBy === 'cloud-manager' && ip.tags?.vmName === vm.name) add('ip', id)
+        else retained.push({ id, reason: '保留非本实例专属公网 IP，仍可能计费' })
+      }
     }
 
     await this.computeClient.virtualMachines.beginDeleteAndWait(parsed.resourceGroup, parsed.resourceName)
-    return { instanceId }
+    const deleted = []
+    const failed = []
+    // Deleting an exclusive NIC first releases its public IP association.
+    for (const resource of [...candidates.values()].sort((a, b) => ['nic', 'ip', 'disk'].indexOf(a.kind) - ['nic', 'ip', 'disk'].indexOf(b.kind))) {
+      const { resourceGroup, resourceName } = parseAzureResourceId(resource.id)
+      const client = resource.kind === 'disk' ? this.computeClient.disks
+        : resource.kind === 'nic' ? this.networkClient.networkInterfaces : this.networkClient.publicIPAddresses
+      try {
+        const current = await client.get(resourceGroup, resourceName)
+        if (resource.kind === 'disk' && (current.managedBy || current.managedByExtended?.length || current.diskState !== 'Unattached')) {
+          throw new Error('磁盘尚未释放或已被其他资源使用，未删除')
+        }
+        if (resource.kind === 'nic' && (current.virtualMachine?.id || current.privateEndpoint?.id)) throw new Error('网卡仍被使用，未删除')
+        if (resource.kind === 'ip' && AzureProvider.normalizePublicIp(current).associated) throw new Error('公网 IP 仍被关联，未删除')
+        await client.beginDeleteAndWait(resourceGroup, resourceName)
+        deleted.push(resource.id)
+      } catch (error) {
+        if (error.statusCode === 404) deleted.push(resource.id)
+        else failed.push({ id: resource.id, error: error.message })
+      }
+    }
+    return { instanceId, cleanup: { complete: failed.length === 0 && retained.length === 0, deleted, retained, failed } }
   }
 
   async instanceAction(instanceId, action) {
     await this._ensureInitialized()
-    const parsed = parseAzureResourceId(instanceId)
-    if (!parsed.resourceGroup || !parsed.resourceName) {
-      throw new Error(`无法识别 Azure 实例 ID: ${instanceId}`)
+    const parsed = this._validateResourceId(instanceId, 'Microsoft.Compute', 'virtualMachines')
+
+    if (['START', 'REBOOT', 'HARD_REBOOT'].includes(action)) {
+      assertAzureFreeSubscription(this.subscription)
+      const vm = await this.computeClient.virtualMachines.get(parsed.resourceGroup, parsed.resourceName)
+      getAzureFreeVmProfile(vm.hardwareProfile?.vmSize || '')
+      const charges = await this._getFreeVmCharges(this.subscriptionId, true)
+      if (this._applyVmCharges([{ name: vm.hardwareProfile.vmSize, available: true }], vm.location || '', charges)[0].available === false) {
+        throw azureFreeOnlyError('本月此实例的区域和规格已有实际计算费用，免费模式不允许启动或重启')
+      }
+      const method = action === 'START' ? 'beginStartAndWait' : 'beginRestartAndWait'
+      await this.computeClient.virtualMachines[method](parsed.resourceGroup, parsed.resourceName)
+      return { instanceId, action }
     }
 
     switch (action) {
-      case 'START':
-        await this.computeClient.virtualMachines.beginStartAndWait(parsed.resourceGroup, parsed.resourceName)
-        break
       case 'STOP':
-        await this.computeClient.virtualMachines.beginPowerOffAndWait(parsed.resourceGroup, parsed.resourceName)
-        break
-      case 'REBOOT':
-      case 'HARD_REBOOT':
-        await this.computeClient.virtualMachines.beginRestartAndWait(parsed.resourceGroup, parsed.resourceName)
+        await this.computeClient.virtualMachines.beginDeallocateAndWait(parsed.resourceGroup, parsed.resourceName)
         break
       default:
         throw new Error(`Azure 不支持的实例操作: ${action}`)
@@ -1284,129 +1399,8 @@ export default class AzureProvider extends BaseComputeProvider {
     })
   }
 
-  _resolveSwitchIpTypes(options = {}) {
-    const ipTypes = Array.isArray(options.ipTypes) && options.ipTypes.length ? options.ipTypes : ['ipv4']
-    return {
-      switchIpv4: ipTypes.includes('ipv4'),
-      switchIpv6: ipTypes.includes('ipv6')
-    }
-  }
-
-  async _findIpConfigurationForVersion(nic, ipVersion) {
-    const configs = nic.ipConfigurations || []
-    const target = String(ipVersion).toUpperCase()
-
-    if (target === 'IPV4') {
-      return configs.find((item) => item.primary && String(item.privateIPAddressVersion || 'IPv4').toUpperCase() !== 'IPV6') ||
-        configs.find((item) => String(item.privateIPAddressVersion || 'IPv4').toUpperCase() !== 'IPV6') ||
-        configs.find((item) => item.primary) ||
-        configs[0] ||
-        null
-    }
-
-    for (const config of configs) {
-      if (String(config.privateIPAddressVersion || '').toUpperCase() === 'IPV6') {
-        return config
-      }
-
-      if (config.publicIPAddress?.id) {
-        const publicIp = await this._getPublicIpById(config.publicIPAddress.id).catch(() => null)
-        if (String(publicIp?.publicIPAddressVersion || '').toUpperCase() === 'IPV6') {
-          return config
-        }
-      }
-    }
-
-    return null
-  }
-
-  async _switchPublicIpVersion(instanceId, ipVersion) {
-    await this._ensureInitialized()
-    const vm = await this.getInstance(instanceId)
-    const rawVm = vm.raw
-    const primaryNicRef = rawVm.networkProfile?.networkInterfaces?.find((item) => item.primary) || rawVm.networkProfile?.networkInterfaces?.[0]
-
-    if (!primaryNicRef?.id) {
-      throw new Error('Azure 实例未绑定网卡，无法切换公网 IP')
-    }
-
-    const nic = await this._getNicById(primaryNicRef.id)
-    const normalizedVersion = String(ipVersion).toLowerCase() === 'ipv6' ? 'IPv6' : 'IPv4'
-    const ipConfig = await this._findIpConfigurationForVersion(nic, normalizedVersion)
-    if (!ipConfig) {
-      throw new Error(`Azure 网卡缺少 ${normalizedVersion} IP 配置`)
-    }
-
-    const oldPublicIpId = ipConfig.publicIPAddress?.id || ''
-    const oldPublicIp = oldPublicIpId ? await this._getPublicIpById(oldPublicIpId).catch(() => null) : null
-    const oldPublicIpVersion = String(oldPublicIp?.publicIPAddressVersion || normalizedVersion).toUpperCase()
-    if (oldPublicIp && oldPublicIpVersion !== normalizedVersion.toUpperCase()) {
-      throw new Error(`Azure 当前公网 IP 不是 ${normalizedVersion}`)
-    }
-
-    const publicIpParsed = oldPublicIpId ? parseAzureResourceId(oldPublicIpId) : parseAzureResourceId(nic.id)
-    const nicParsed = parseAzureResourceId(nic.id)
-    const publicIpName = `${safeName(rawVm.name || nic.name || 'vm')}-pip-${normalizedVersion.toLowerCase()}-${randomSuffix(5)}`
-
-    const newPublicIp = await this.networkClient.publicIPAddresses.beginCreateOrUpdateAndWait(
-      publicIpParsed.resourceGroup || nicParsed.resourceGroup,
-      publicIpName,
-      {
-        location: nic.location || rawVm.location,
-        publicIPAllocationMethod: oldPublicIp?.publicIPAllocationMethod || 'Static',
-        publicIPAddressVersion: normalizedVersion,
-        sku: { name: oldPublicIp?.sku?.name || 'Standard' },
-        tags: { managedBy: 'cloud-manager', rotatedFrom: oldPublicIp?.name || '' }
-      }
-    )
-
-    ipConfig.publicIPAddress = { id: newPublicIp.id }
-    await this._updateNic(nic)
-
-    if (oldPublicIp?.id) {
-      const oldParsed = parseAzureResourceId(oldPublicIp.id)
-      try {
-        await this.networkClient.publicIPAddresses.beginDeleteAndWait(oldParsed.resourceGroup, oldParsed.resourceName)
-      } catch (_) {
-      }
-    }
-
-    if (normalizedVersion === 'IPv6') {
-      return {
-        newIpv6: newPublicIp.ipAddress,
-        oldIpv6: oldPublicIp?.ipAddress || null
-      }
-    }
-
-    return {
-      newIpv4: newPublicIp.ipAddress,
-      oldIpv4: oldPublicIp?.ipAddress || null
-    }
-  }
-
-  async switchPublicIp(instanceId, options = {}) {
-    if (AZURE_FREE_ONLY) {
-      throw Object.assign(new Error('免费模式不会创建或切换公网 IP；如需公网 IP，请关闭 AZURE_FREE_ONLY'), { code: 'FreeOnlyMode' })
-    }
-
-    const { switchIpv4, switchIpv6 } = this._resolveSwitchIpTypes(options)
-    const result = { switchedTypes: [] }
-
-    if (switchIpv4) {
-      Object.assign(result, await this._switchPublicIpVersion(instanceId, 'ipv4'))
-      result.switchedTypes.push('ipv4')
-    }
-
-    if (switchIpv6) {
-      Object.assign(result, await this._switchPublicIpVersion(instanceId, 'ipv6'))
-      result.switchedTypes.push('ipv6')
-    }
-
-    return {
-      ...result,
-      newIp: result.newIpv4 || result.newIpv6 || null,
-      oldIp: result.oldIpv4 || result.oldIpv6 || null
-    }
+  async switchPublicIp() {
+    throw azureFreeOnlyError('免费模式不创建或切换收费公网 IP')
   }
 
   async allowAllInboundTraffic(instanceId) {

@@ -7,6 +7,7 @@ import { resumePersistedTasks } from './queue.mjs'
 import accountsRouter from './routes/accounts.mjs'
 import authRouter, { authRequired } from './routes/auth.mjs'
 import cloudRouter from './routes/cloud.mjs'
+import billingRouter from './routes/billing.mjs'
 import dnsRouter from './routes/dnsRoute.mjs'
 import logsRouter from './routes/logs.mjs'
 import settingsRouter from './routes/settings.mjs'
@@ -38,6 +39,7 @@ app.use('/api', (req, res, next) => {
 
 app.use('/api/accounts', accountsRouter)
 app.use('/api/cloud/:accountId', cloudRouter)
+app.use('/api/billing', billingRouter)
 app.use('/api/dns/:dnsAccountId', dnsRouter)
 app.use('/api/tasks', tasksRouter)
 app.use('/api/settings', settingsRouter)
