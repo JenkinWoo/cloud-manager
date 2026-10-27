@@ -228,7 +228,7 @@ router.get('/azure/create-options', async (req, res) => {
     }
     res.json(await getComputeProvider(account).listCreateOptions(req.query.subscriptionId.trim()))
   } catch (error) {
-    res.status(error.statusCode === 400 ? 400 : 500).json({ error: error.message })
+    res.status([400, 403].includes(error.statusCode) ? error.statusCode : 500).json({ error: error.message, code: error.code })
   }
 })
 
@@ -245,7 +245,7 @@ router.get('/azure/vm-sizes', async (req, res) => {
     const provider = getComputeProvider(account)
     res.json(await provider.listVmSizes(req.query.location, req.query.subscriptionId))
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    res.status([400, 403].includes(err.statusCode) ? err.statusCode : 500).json({ error: err.message, code: err.code })
   }
 })
 
@@ -279,6 +279,10 @@ router.post('/instances', async (req, res) => {
       throw new Error('Azure 实例创建需要 adminPassword')
     }
 
+    if (account.computeProvider === 'azure') {
+      Object.assign(params, await getScopedProvider(account, req).prepareFreeCreate(params))
+    }
+
     const task = await createTask('cloud:createInstance', account.id, {
       ...params,
       delay,
@@ -287,7 +291,7 @@ router.post('/instances', async (req, res) => {
 
     res.status(202).json({ taskId: task.id, message: '创建任务已加入队列' })
   } catch (err) {
-    res.status(err.statusCode === 403 ? 403 : 500).json({ error: err.message, code: err.code })
+    res.status([400, 403].includes(err.statusCode) ? err.statusCode : 500).json({ error: err.message, code: err.code })
   }
 })
 
@@ -309,6 +313,26 @@ router.delete('/instances/:instanceId', async (req, res) => {
     res.json({ success: true, ...(await provider.deleteInstance(req.params.instanceId)) })
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/instances/:instanceId/public-ip', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    const provider = getScopedProvider(account, req)
+    if (!(provider.constructor.capabilities || []).includes('bind_public_ip')) {
+      return res.status(400).json({ error: '当前账户不支持绑定公网 IP' })
+    }
+    if (typeof req.body?.subscriptionId !== 'string' || !req.body.subscriptionId.trim()) {
+      return res.status(400).json({ error: '请选择 Azure 订阅' })
+    }
+    setOperationLogTarget(req, { accountName: account.name })
+    await attachInstanceOperationLogTarget(req, account, provider)
+    const { mode, publicIpId } = req.body
+    res.json({ success: true, ...(await provider.bindPublicIp(req.params.instanceId, { mode, publicIpId })) })
+  } catch (error) {
+    res.status([400, 403, 404, 409, 412].includes(error.statusCode) ? error.statusCode : 500)
+      .json({ error: error.message, publicIpId: error.publicIpId })
   }
 })
 
@@ -452,6 +476,27 @@ router.get('/public-ips', async (req, res) => {
     res.json(await withTimeout(provider.listPublicIps(), TRAFFIC_TIMEOUT_MS, '公网 IP 列表请求超时，请重试'))
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/public-ips', async (req, res) => {
+  try {
+    const account = requireAccount(req.params.accountId)
+    if (typeof req.body?.subscriptionId !== 'string' || !req.body.subscriptionId.trim()) {
+      return res.status(400).json({ error: '请选择 Azure 订阅' })
+    }
+    const provider = getScopedProvider(account, req)
+    if (!(provider.constructor.capabilities || []).includes('manage_public_ips') || typeof provider.createPublicIp !== 'function') {
+      return res.status(400).json({ error: '当前账户不支持创建公网 IP' })
+    }
+    setOperationLogTarget(req, { accountName: account.name, targetName: '新建公网 IP' })
+    const { location, requestId } = req.body
+    const result = await provider.createPublicIp({ location, requestId })
+    setOperationLogTarget(req, { targetName: result.name, publicIpAddress: result.ipAddress })
+    res.status(201).json(result)
+  } catch (error) {
+    res.status([400, 403, 404, 409].includes(error.statusCode) ? error.statusCode : 500)
+      .json({ error: error.message, code: error.code })
   }
 })
 

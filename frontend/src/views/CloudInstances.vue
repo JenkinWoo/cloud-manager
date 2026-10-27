@@ -6,9 +6,10 @@
         <p>统一管理 Oracle、AWS、Azure 等计算实例。</p>
       </div>
       <div class="header-actions">
-        <button v-if="isAzureAccount" class="btn btn-ghost" :disabled="!azureSubscriptionId" @click="showPublicIpModal = true">管理公网 IP</button>
-        <button class="btn btn-ghost" :disabled="!selectedAccountId || loading" @click="refreshCurrent">刷新</button>
-        <button class="btn btn-primary" :disabled="!selectedAccountId || !canCreate" :title="azureCostBlocked ? azureCostReason : ''" @click="openCreate">新建实例</button>
+        <button v-if="isAzureAccount" class="btn btn-ghost" :disabled="!azureSubscriptionId" @click="openPublicIpManager()">管理公网 IP</button>
+        <button v-if="isAzureAccount" class="btn btn-ghost" :disabled="!azureSubscriptionId" @click="openPublicIpManager(true)">新建公网 IP</button>
+        <button class="btn btn-ghost" :disabled="!selectedAccountId || pageLoading" @click="retryResources">{{ pageLoading ? '加载中…' : '刷新' }}</button>
+        <button class="btn btn-primary" :disabled="pageLoading || !selectedAccountId || !canCreate" :title="azureCostBlocked ? azureCostReason : ''" @click="openCreate">新建实例</button>
       </div>
     </div>
 
@@ -20,17 +21,24 @@
       </button>
     </div>
 
-    <div v-if="!selectedAccountId" class="card empty-state">
+    <div v-if="pageLoading" class="card loading-wrap resource-loading" role="status" aria-live="polite" aria-busy="true">
+      <div class="spinner" aria-hidden="true"></div>
+      <strong>{{ loadingMessage }}</strong>
+      <p class="form-hint">{{ selectedAccount?.name || '正在连接服务' }} · 云平台响应可能需要一些时间，请稍候。</p>
+    </div>
+
+    <div v-else-if="accountsError" class="card empty-state" role="alert">
+      <p>计算账户加载失败：{{ accountsError }}</p>
+      <button class="btn btn-primary" @click="loadAccounts">重新加载</button>
+    </div>
+
+    <div v-else-if="!selectedAccountId" class="card empty-state">
       <div class="empty-icon">!</div>
-      <p>请选择一个计算账户。</p>
+      <p>{{ accounts.length ? '请选择一个计算账户。' : '还没有可用的计算账户，请先在账户管理中添加。' }}</p>
     </div>
 
     <template v-else>
-      <div v-if="loading" class="card loading-wrap">
-        <div class="spinner"></div>
-      </div>
-
-      <template v-else>
+      <div class="resource-content">
         <div class="card summary-card">
           <div class="summary-item">
             <span class="summary-label">账户</span>
@@ -42,7 +50,7 @@
           </div>
           <div class="summary-item">
             <span class="summary-label">实例数量</span>
-            <span class="summary-value">{{ instances.length }}</span>
+            <span class="summary-value">{{ instancesLoaded ? instances.length : '未加载' }}</span>
           </div>
         </div>
 
@@ -66,17 +74,22 @@
           <AzureSubscriptionBilling v-if="azureSubscriptionId" :account-id="selectedAccountId" :subscription-id="azureSubscriptionId" />
         </div>
 
-        <div v-if="isAzureAccount && !azureSubscriptionId" class="card empty-state">
+        <div v-if="resourceError" class="card empty-state" role="alert">
+          <p>{{ instancesLoaded ? '部分资源加载失败' : '资源加载失败' }}：{{ resourceError }}</p>
+          <button class="btn btn-primary" @click="retryResources">重新加载</button>
+        </div>
+
+        <div v-else-if="isAzureAccount && !azureSubscriptionId" class="card empty-state">
           <div class="empty-icon">-</div>
           <p>当前 Azure 账户下没有可用的学生优惠 / 免费订阅。</p>
         </div>
 
-        <div v-else-if="instances.length === 0" class="card empty-state">
+        <div v-else-if="instancesLoaded && instances.length === 0" class="card empty-state">
           <div class="empty-icon">-</div>
           <p>当前账户下还没有实例。</p>
         </div>
 
-        <div v-else class="instances-grid">
+        <div v-if="instances.length" class="instances-grid">
           <div v-for="instance in instances" :key="instance.id" class="card instance-card">
             <div class="instance-card-header">
               <div>
@@ -100,7 +113,13 @@
                 <div v-if="instance.publicIps?.length" class="ip-list">
                   <span v-for="ip in instance.publicIps" :key="ip" class="ip-tag">{{ ip }}</span>
                 </div>
-                <span v-else class="info-value">-</span>
+                <div v-else class="ip-empty">
+                  <span class="info-value">未分配</span>
+                  <button v-if="isAzureAccount" class="btn btn-primary btn-sm"
+                    :disabled="!azureSubscriptionId || !hasCapability('bind_public_ip')"
+                    :title="hasCapability('bind_public_ip') ? '绑定空闲地址或创建新的收费静态公网 IPv4' : '后端暂未提供绑定功能，请刷新页面或重启后端'"
+                    @click="publicIpTarget = instance">绑定 / 创建公网 IP</button>
+                </div>
               </div>
               <div class="info-row">
                 <span class="info-label">私网 IP</span>
@@ -204,13 +223,19 @@
               @click="openVolumesModal">管理引导卷</button>
           </div>
         </div>
-      </template>
+      </div>
     </template>
 
     <AzurePublicIpDialog v-if="showPublicIpModal && isAzureAccount && azureSubscriptionId"
       :key="`${selectedAccountId}:${azureSubscriptionId}`" :account-id="selectedAccountId"
       :subscription-id="azureSubscriptionId" :account-name="selectedAccount?.name || ''"
-      :subscription-name="selectedAzureSubscription?.displayName || ''" @close="showPublicIpModal = false" />
+      :subscription-name="selectedAzureSubscription?.displayName || ''" :initial-create="publicIpCreateOnOpen"
+      @close="showPublicIpModal = false" />
+
+    <AzureBindPublicIpDialog v-if="publicIpTarget && isAzureAccount && azureSubscriptionId"
+      :key="`${selectedAccountId}:${azureSubscriptionId}:${publicIpTarget.id}`" :account-id="selectedAccountId"
+      :subscription-id="azureSubscriptionId" :account-name="selectedAccount?.name || ''" :instance="publicIpTarget"
+      @close="publicIpTarget = null" @bound="publicIpTarget = null; refreshCurrent()" />
 
     <div v-if="renameTarget" class="modal-overlay" @click.self="closeRename">
       <form class="modal" role="dialog" aria-modal="true" aria-labelledby="rename-title" @submit.prevent="confirmRename">
@@ -285,8 +310,9 @@
         </template>
 
         <template v-else-if="selectedAccount?.computeProvider === 'azure'">
-          <AzureCreateOptions v-if="showCreateModal" :account-id="selectedAccountId" :subscription-id="azureSubscriptionId"
-            :disabled="creating || loadingAzureLocations || loadingAzureVmSizes" @select="applyAzureCreateOption" />
+          <AzureCreateOptions v-if="showCreateModal" :result="azureCreateRecommendations" :loading="loadingAzureLocations"
+            :error="azureCreateOptionsError" :disabled="creating || loadingAzureVmSizes"
+            @refresh="loadAzureLocations()" @select="applyAzureCreateOption" />
           <div class="form-group">
             <label>订阅</label>
             <select v-model="createForm.subscriptionId" class="form-control" disabled>
@@ -296,7 +322,7 @@
           </div>
           <div class="form-grid">
             <div class="form-group">
-              <label>Location</label>
+              <label>区域（通过免费记录检查的组合）</label>
               <select v-model="createForm.location" class="form-control"
                 :disabled="loadingAzureLocations || !createForm.subscriptionId" @change="handleAzureLocationChange">
                 <option value="" disabled>
@@ -325,6 +351,10 @@
               <button type="button" class="btn btn-ghost btn-sm" :disabled="loadingAzureVmSizes || !createForm.location" @click="loadAzureVmSizes()">重新加载规格</button>
             </div>
           </div>
+          <div class="form-group">
+            <label>系统盘与镜像</label>
+            <p class="form-hint">64 GiB Premium SSD LRS（P6）· Ubuntu 22.04 · 不添加数据盘或诊断存储；创建前自动检查本区域的 P6 免费计费记录及用量。</p>
+          </div>
           <div class="form-grid">
             <div class="form-group">
               <label>Admin Username</label>
@@ -335,6 +365,14 @@
             input-id="azure-create-password" label="管理员密码" :disabled="creating"
             rule="12–72 位，至少包含大小写字母、数字、特殊字符中的三类。"
             @generating="generatingPassword = $event" />
+          <div class="form-group">
+            <label for="azure-create-public-ip">公网 IPv4</label>
+            <select id="azure-create-public-ip" v-model="createForm.createPublicIp" class="form-control" :disabled="creating">
+              <option :value="false">仅私网（默认）</option>
+              <option :value="true">创建并绑定 Standard 静态公网 IPv4（收费）</option>
+            </select>
+            <p class="form-hint">公网 IP 按 Azure 定价单独计费，免费出站流量不包含 IP 费用；实例停止后仍可能计费。删除实例时会同时删除绑定的公网 IP。</p>
+          </div>
           <div class="form-hint">
             {{ azureCostReason }}
           </div>
@@ -342,7 +380,7 @@
 
         <div class="modal-footer">
           <button class="btn btn-ghost" @click="closeCreate">取消</button>
-          <button class="btn btn-primary" :disabled="creating || generatingPassword || !canCreate" @click="submitCreate">
+          <button class="btn btn-primary" :disabled="creating || generatingPassword || !canCreate || (isAzureAccount && (loadingAzureLocations || loadingAzureVmSizes || !visibleAzureVmSizes.some(size => size.name === createForm.vmSize)))" @click="submitCreate">
             {{ creating ? '提交中...' : '加入任务队列' }}
           </button>
         </div>
@@ -478,7 +516,12 @@
           <button class="modal-close" @click="closeVolumes">x</button>
         </div>
         <div v-if="loadingVolumes" class="loading-wrap">
-          <div class="spinner"></div>
+          <div class="spinner" aria-hidden="true"></div>
+          <span role="status">正在加载引导卷…</span>
+        </div>
+        <div v-else-if="volumesError" class="empty-state" role="alert">
+          <p>引导卷加载失败：{{ volumesError }}</p>
+          <button class="btn btn-primary" @click="openVolumesModal">重新加载</button>
         </div>
         <div v-else-if="!volumes.length" class="empty-state">
           <p>没有可管理的引导卷。</p>
@@ -547,6 +590,7 @@ import { accountsApi, cloudApi, dnsApi } from '../api/index.js'
 import { toFullRecordName } from '../utils/dnsRecordName.js'
 import InstancePasswordInput from '../components/InstancePasswordInput.vue'
 import AzurePublicIpDialog from '../components/AzurePublicIpDialog.vue'
+import AzureBindPublicIpDialog from '../components/AzureBindPublicIpDialog.vue'
 import AzureCreateOptions from '../components/AzureCreateOptions.vue'
 import AzureSubscriptionBilling from '../components/AzureSubscriptionBilling.vue'
 
@@ -557,6 +601,11 @@ const instances = ref([])
 const elasticIps = ref([])
 const capabilities = ref([])
 const loading = ref(false)
+const loadingAccounts = ref(true)
+const accountsError = ref('')
+const resourceError = ref('')
+const instancesLoaded = ref(false)
+const resourceStage = ref('instances')
 const renameTarget = ref(null)
 const renameName = ref('')
 const renameError = ref('')
@@ -568,13 +617,17 @@ const azureLocations = ref([])
 const azureVmSizes = ref([])
 const azureVmSizesError = ref('')
 const azureCostPolicy = ref(null)
-const visibleAzureVmSizes = computed(() => azureVmSizes.value.filter(item => item.freeTierCandidate === true))
+const azureCreateRecommendations = ref(null)
+const azureCreateOptionsError = ref('')
+const visibleAzureVmSizes = computed(() => azureVmSizes.value.filter(item => item.freeEligible === true && item.available === true))
 const loadingAzureSubscriptions = ref(false)
 const loadingAzureLocations = ref(false)
 const loadingAzureVmSizes = ref(false)
 
 const showCreateModal = ref(false)
 const showPublicIpModal = ref(false)
+const publicIpCreateOnOpen = ref(false)
+const publicIpTarget = ref(null)
 const showSwitchIpModal = ref(false)
 const showShapeModal = ref(false)
 const showVolumesModal = ref(false)
@@ -588,6 +641,7 @@ const switchingIp = ref(false)
 const modifyingShape = ref(false)
 const settingUpNetwork = ref(false)
 const loadingVolumes = ref(false)
+const volumesError = ref('')
 const resizingVolume = ref(false)
 
 const volumes = ref([])
@@ -631,6 +685,10 @@ const shapeForm = ref({ ocpus: 1, memoryGb: 6 })
 const volumeSizeForm = ref({ sizeInGBs: 0 })
 
 const selectedAccount = computed(() => accounts.value.find((item) => item.id === selectedAccountId.value) || null)
+const pageLoading = computed(() => loadingAccounts.value || loadingAzureSubscriptions.value || loading.value)
+const loadingMessage = computed(() => loadingAzureSubscriptions.value ? '正在查询 Azure 订阅…'
+  : loading.value ? (resourceStage.value === 'ips' ? '正在查询公网 IP 资源…' : '正在查询实例和资源状态…')
+    : '正在加载计算账户…')
 const isAzureAccount = computed(() => selectedAccount.value?.computeProvider === 'azure')
 const azureCostBlocked = computed(() => isAzureAccount.value &&
   (azureCostPolicy.value?.creationAllowed !== true || azureCostPolicy.value?.startAllowed !== true))
@@ -667,20 +725,36 @@ onBeforeUnmount(() => {
 })
 
 async function loadAccounts() {
-  const [accountRes, dnsRes] = await Promise.all([accountsApi.list(), accountsApi.listDns()])
-  accounts.value = (accountRes.data || []).filter((item) => item.computeProvider && item.enabled !== false)
-  dnsAccounts.value = (dnsRes.data || []).filter((item) => item.enabled !== false)
-
-  if (accounts.value.length && !selectedAccountId.value) {
-    await selectAccount(accounts.value[0].id)
+  loadingAccounts.value = true
+  accountsError.value = ''
+  try {
+    const [accountResult, dnsResult] = await Promise.allSettled([accountsApi.list(), accountsApi.listDns()])
+    if (accountResult.status === 'rejected') throw accountResult.reason
+    accounts.value = (accountResult.value.data || []).filter((item) => item.computeProvider && item.enabled !== false)
+    if (dnsResult.status === 'fulfilled') dnsAccounts.value = (dnsResult.value.data || []).filter((item) => item.enabled !== false)
+    else toast('DNS 账户加载失败，切换 IP 时请重新加载账户', 'error')
+    if (accounts.value.length && !selectedAccountId.value) await selectAccount(accounts.value[0].id)
+  } catch (error) {
+    accountsError.value = error.response?.data?.error || error.message
+  } finally {
+    loadingAccounts.value = false
   }
 }
 
+async function retryResources() {
+  if (pageLoading.value) return
+  if (isAzureAccount.value && !azureSubscriptionId.value) await selectAccount(selectedAccountId.value)
+  else await refreshCurrent()
+}
+
 async function selectAccount(id) {
+  if (id === selectedAccountId.value && pageLoading.value) return
   const accountId = id
   abortAccountScopedRequests()
 
   selectedAccountId.value = id
+  resourceError.value = ''
+  instancesLoaded.value = false
   azureCostPolicy.value = null
   instances.value = []
   elasticIps.value = []
@@ -697,9 +771,15 @@ async function selectAccount(id) {
   await refreshCurrent()
 }
 
+function openPublicIpManager(create = false) {
+  publicIpCreateOnOpen.value = create
+  showPublicIpModal.value = true
+}
+
 function resetTransientState() {
   resetSwitchDnsRecords()
   showPublicIpModal.value = false
+  publicIpTarget.value = null
   renameTarget.value = null
   renameName.value = ''
   renameError.value = ''
@@ -822,7 +902,7 @@ function pickDefaultLocation(locations = []) {
 }
 
 function pickDefaultVmSize(sizes = []) {
-  const preferred = ['Standard_B1s', 'Standard_B2ats_v2', 'Standard_B2pts_v2']
+  const preferred = ['Standard_B2ats_v2', 'Standard_B2pts_v2', 'Standard_B1s']
   return preferred.find((name) => sizes.some((item) => item.name === name && item.available !== false)) || ''
 }
 
@@ -857,11 +937,11 @@ async function loadAzureSubscriptions(accountId = selectedAccountId.value) {
     azureSubscriptionId.value = selected?.subscriptionId || ''
     if (azureSubscriptionId.value) {
       localStorage.setItem(getAzureSubscriptionStorageKey(accountId), azureSubscriptionId.value)
-      await loadAzureLocations(accountId, azureSubscriptionId.value)
     }
   } catch (error) {
     if (isAbortError(error)) return
-    if (selectedAccountId.value !== accountId) return
+    if (controller.signal.aborted || requestId !== azureSubscriptionsRequestId || selectedAccountId.value !== accountId) return
+    resourceError.value = error.response?.data?.error || error.message
     toast(error.response?.data?.error || error.message, 'error')
   } finally {
     if (requestId === azureSubscriptionsRequestId && azureSubscriptionsController === controller) {
@@ -880,6 +960,12 @@ async function loadAzureLocations(accountId = selectedAccountId.value, subscript
   azureLocations.value = []
   azureVmSizes.value = []
 
+  azureCreateRecommendations.value = null
+  azureCreateOptionsError.value = ''
+  const forCreation = showCreateModal.value
+  const previousSize = createForm.value.vmSize
+  if (forCreation) createForm.value.vmSize = ''
+
   if (!accountId || !subscriptionId) {
     return
   }
@@ -888,7 +974,9 @@ async function loadAzureLocations(accountId = selectedAccountId.value, subscript
   azureLocationsController = controller
   loadingAzureLocations.value = true
   try {
-    const response = await cloudApi.listAzureLocations(accountId, { subscriptionId }, { signal: controller.signal })
+    const response = forCreation
+      ? await cloudApi.listAzureCreateOptions(accountId, { subscriptionId }, { signal: controller.signal })
+      : await cloudApi.listAzureLocations(accountId, { subscriptionId }, { signal: controller.signal })
     if (
       controller.signal.aborted ||
       requestId !== azureLocationsRequestId ||
@@ -898,15 +986,29 @@ async function loadAzureLocations(accountId = selectedAccountId.value, subscript
       return
     }
 
+    if (forCreation) {
+      if (!showCreateModal.value) return
+      if (response.data.subscriptionId !== subscriptionId) throw new Error('免费组合的订阅不匹配，请刷新重试')
+      const result = response.data
+      azureCreateRecommendations.value = result
+      azureLocations.value = result.regions.filter(region => result.options.some(option => option.location === region.location))
+        .map(region => ({ name: region.location, displayName: region.displayName }))
+      const selected = result.options.find(option => option.location === createForm.value.location && option.vmSize === previousSize) || result.options[0]
+      createForm.value.location = selected?.location || ''
+      createForm.value.vmSize = selected?.vmSize || ''
+      azureVmSizes.value = result.regions.find(region => region.location === selected?.location)?.sizes || []
+      return
+    }
     azureLocations.value = response.data || []
 
     const hasCurrentLocation = azureLocations.value.some((item) => item.name === createForm.value.location)
     createForm.value.location = hasCurrentLocation ? createForm.value.location : pickDefaultLocation(azureLocations.value)
 
-    await loadAzureVmSizes(accountId, subscriptionId, createForm.value.location)
+    // Creation options are loaded when the form opens, not while browsing VMs.
   } catch (error) {
     if (isAbortError(error)) return
     if (selectedAccountId.value !== accountId || azureSubscriptionId.value !== subscriptionId) return
+    azureCreateOptionsError.value = error.response?.data?.error || error.message
     toast(error.response?.data?.error || error.message, 'error')
   } finally {
     if (requestId === azureLocationsRequestId && azureLocationsController === controller) {
@@ -967,6 +1069,7 @@ async function loadAzureVmSizes(
 
 async function handleAzureSubscriptionChange() {
   showPublicIpModal.value = false
+  publicIpTarget.value = null
   renameTarget.value = null
   const accountId = selectedAccountId.value
   const subscriptionId = azureSubscriptionId.value
@@ -990,9 +1093,7 @@ async function handleAzureSubscriptionChange() {
     createForm.value.vmSize = ''
   }
 
-  await loadAzureLocations(accountId, subscriptionId)
-  if (selectedAccountId.value !== accountId || azureSubscriptionId.value !== subscriptionId) return
-  await refreshCurrent()
+  await Promise.all([refreshCurrent(), ...(showCreateModal.value ? [loadAzureLocations(accountId, subscriptionId)] : [])])
 }
 
 async function handleAzureLocationChange() {
@@ -1036,6 +1137,9 @@ async function refreshCurrent() {
   const controller = new AbortController()
   refreshController = controller
   loading.value = true
+  resourceStage.value = 'instances'
+  resourceError.value = ''
+  instancesLoaded.value = false
   instances.value = []
   elasticIps.value = []
   capabilities.value = []
@@ -1060,8 +1164,10 @@ async function refreshCurrent() {
     capabilities.value = nextCapabilities
     azureCostPolicy.value = capabilitiesRes.data.costPolicy || null
     instances.value = instanceRes.data || []
+    instancesLoaded.value = true
 
     if (nextCapabilities.includes('elastic_ip')) {
+      resourceStage.value = 'ips'
       const eipRes = await cloudApi.listElasticIps(accountId, requestParams, { signal: controller.signal })
       if (
         controller.signal.aborted ||
@@ -1075,7 +1181,9 @@ async function refreshCurrent() {
     }
   } catch (error) {
     if (isAbortError(error)) return
-    if (selectedAccountId.value !== accountId) return
+    if (controller.signal.aborted || requestId !== refreshRequestId || selectedAccountId.value !== accountId ||
+        (account?.computeProvider === 'azure' && azureSubscriptionId.value !== subscriptionId)) return
+    resourceError.value = error.response?.data?.error || error.message
     toast(error.response?.data?.error || error.message, 'error')
   } finally {
     if (requestId === refreshRequestId && refreshController === controller) {
@@ -1152,7 +1260,8 @@ async function openCreate() {
       location: '',
       vmSize: '',
       adminUsername: 'azureuser',
-      adminPassword: ''
+      adminPassword: '',
+      createPublicIp: false
     }
 
     showCreateModal.value = true
@@ -1164,6 +1273,7 @@ async function openCreate() {
 }
 
 function closeCreate() {
+  abortAzureLocationRequests()
   showCreateModal.value = false
   createForm.value = {}
   generatingPassword.value = false
@@ -1227,7 +1337,7 @@ async function runAction(instance, action) {
 }
 
 async function terminate(instance) {
-  const cleanupHint = isAzureAccount.value ? '同时删除随实例创建的系统盘、专属网卡和公网 IP；共享或外部资源会保留并提示。' : ''
+  const cleanupHint = isAzureAccount.value ? '同时删除随实例创建的系统盘、专属网卡及所有绑定的公网 IP（包括从空闲列表绑定的地址）；原公网地址可能无法找回。其他需要保留或清理失败的资源会逐项提示。' : ''
   const ok = window.confirm(`确认删除实例「${instance.displayName || instance.id}」吗？${cleanupHint}此操作不可恢复。`)
   if (!ok) return
 
@@ -1555,6 +1665,7 @@ async function openVolumesModal() {
   volumesController = controller
   showVolumesModal.value = true
   loadingVolumes.value = true
+  volumesError.value = ''
   volumes.value = []
 
   try {
@@ -1574,7 +1685,8 @@ async function openVolumesModal() {
     volumes.value = response.data || []
   } catch (error) {
     if (isAbortError(error)) return
-    if (selectedAccountId.value !== accountId) return
+    if (controller.signal.aborted || requestId !== volumesRequestId || selectedAccountId.value !== accountId) return
+    volumesError.value = error.response?.data?.error || error.message
     toast(error.response?.data?.error || error.message, 'error')
   } finally {
     if (requestId === volumesRequestId && volumesController === controller) {
@@ -1763,7 +1875,11 @@ function validateLinuxPassword(password, provider) {
   justify-content: center;
   align-items: center;
   min-height: 140px;
+  gap: 16px;
 }
+
+.resource-loading { flex-direction: column; padding: 32px 20px; text-align: center; }
+.resource-loading .form-hint { margin: 0; }
 
 .summary-card {
   display: grid;
@@ -1865,6 +1981,14 @@ function validateLinuxPassword(password, provider) {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 4px;
+}
+
+.ip-empty {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .ip-tag-muted {

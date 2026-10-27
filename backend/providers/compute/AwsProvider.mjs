@@ -71,7 +71,7 @@ export default class AwsProvider extends BaseComputeProvider {
     })
     const request = {
       TimePeriod: { Start: start.toISOString().slice(0, 10), End: end.toISOString().slice(0, 10) },
-      Granularity: 'MONTHLY',
+      Granularity: 'DAILY',
       Metrics: ['UnblendedCost', 'UsageQuantity'],
       GroupBy: [
         { Type: 'DIMENSION', Key: 'SERVICE' },
@@ -98,7 +98,8 @@ export default class AwsProvider extends BaseComputeProvider {
         unit: group.Metrics?.UsageQuantity?.Unit || '',
         currency: group.Metrics?.UnblendedCost?.Unit || '',
         periodStart: period.TimePeriod?.Start || null,
-        periodEnd: period.TimePeriod?.End || null
+        periodEnd: period.TimePeriod?.End || null,
+        periodEndExclusive: true
       }))
     ))
     return {

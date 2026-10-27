@@ -35,14 +35,15 @@ export function groupBillingRows(rows) {
   const groups = new Map()
   for (const row of rows) {
     if (billingNumber(row.amount) === null) throw new Error('账单接口返回的费用缺失或无效')
-    const key = JSON.stringify([row.service, row.meter, row.resource, row.region, row.unit, row.currency, row.unitPrice, row.chargeType])
+    // Preserve dated line items: merging different usage periods hides when a
+    // charge occurred and incorrectly makes gaps look like continuous usage.
+    const key = JSON.stringify([row.service, row.meter, row.resource, row.region, row.unit, row.currency, row.unitPrice, row.chargeType,
+      row.periodStart || null, row.periodEnd || null, row.periodEndExclusive === true])
     const current = groups.get(key)
     if (!current) groups.set(key, { ...row })
     else {
       current.amount += row.amount
       current.usage = current.usage === null || row.usage === null ? null : current.usage + row.usage
-      if (row.periodStart && (!current.periodStart || row.periodStart < current.periodStart)) current.periodStart = row.periodStart
-      if (row.periodEnd && (!current.periodEnd || row.periodEnd > current.periodEnd)) current.periodEnd = row.periodEnd
     }
   }
   return [...groups.values()].sort((a, b) => b.amount - a.amount)

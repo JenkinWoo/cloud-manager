@@ -7,17 +7,18 @@ export const AZURE_FREE_VM_PROFILES = Object.freeze({
 })
 
 export const AZURE_COST_POLICY = Object.freeze({
-  mode: 'free-only', creationAllowed: true, startAllowed: true, publicIpAllowed: false,
+  mode: 'free-vm-optional-paid-ip', creationAllowed: true, startAllowed: true, publicIpAllowed: true,
+  publicIp: Object.freeze({ sku: 'Standard', allocationMethod: 'Static', version: 'IPv4', chargeable: true, defaultEnabled: false }),
   vmSizes: Object.keys(AZURE_FREE_VM_PROFILES),
   osDisk: Object.freeze({ storageAccountType: 'Premium_LRS', diskSizeGB: 64, tier: 'P6' }),
-  reason: '仅允许免费额度规格 B1s、B2ats v2 和 B2pts v2；默认使用 Ubuntu、64 GiB P6 系统盘和私网，不创建公网 IP。免费权益有有效期及月度用量上限。'
+  reason: '自动按当前订阅本月的 Free 计费记录、用量和现有资源筛选区域及机型，固定 Ubuntu 与 64 GiB P6 系统盘；默认私网，仅公网 IPv4 可选付费。无需手填权益。历史免费记录不保证后续免费，实际权益有效期及剩余额度以 Azure 为准。'
 })
 
 export function azureFreeOnlyError(message) {
   return Object.assign(new Error(message), { code: 'FreeOnlyMode', statusCode: 403, retryable: false })
 }
 
-export function getAzureFreeVmProfile(vmSize = 'Standard_B1s') {
+export function getAzureFreeVmProfile(vmSize = 'Standard_B2ats_v2') {
   if (!Object.hasOwn(AZURE_FREE_VM_PROFILES, vmSize)) {
     throw azureFreeOnlyError('仅允许免费额度规格：B1s、B2ats v2、B2pts v2')
   }
@@ -25,7 +26,7 @@ export function getAzureFreeVmProfile(vmSize = 'Standard_B1s') {
 }
 
 export function validateAzureFreeCreateParams(params = {}) {
-  const vmSize = params.vmSize || 'Standard_B1s'
+  const vmSize = params.vmSize || 'Standard_B2ats_v2'
   const profile = getAzureFreeVmProfile(vmSize)
   const image = { publisher: 'Canonical', offer: '0001-com-ubuntu-server-jammy', sku: profile.imageSku, version: 'latest' }
   for (const [key, value] of Object.entries(image)) {
@@ -40,10 +41,14 @@ export function validateAzureFreeCreateParams(params = {}) {
   for (const field of ['diskSizeGB', 'osDiskSizeGB']) {
     if (params[field] != null && Number(params[field]) !== 64) throw azureFreeOnlyError('免费模式系统盘固定为 64 GiB P6')
   }
-  for (const field of ['publicIp', 'assignPublicIp', 'createPublicIp', 'publicIpEnabled']) {
-    if (params[field] != null && ![false, 'false', 'none', ''].includes(params[field])) throw azureFreeOnlyError('免费模式不创建收费公网 IP')
+  const ipFields = ['publicIp', 'assignPublicIp', 'createPublicIp', 'publicIpEnabled']
+  for (const field of ipFields) {
+    if (params[field] != null && ![true, 'true', false, 'false', 'none', ''].includes(params[field])) {
+      throw Object.assign(new Error('公网 IP 选项必须为 true 或 false'), { statusCode: 400, retryable: false })
+    }
   }
-  return { vmSize, ...profile, image, osDisk: AZURE_COST_POLICY.osDisk }
+  const createPublicIp = ipFields.some(field => [true, 'true'].includes(params[field]))
+  return { vmSize, ...profile, image, osDisk: AZURE_COST_POLICY.osDisk, createPublicIp }
 }
 
 export function assertAzureFreeSubscription(subscription = {}) {

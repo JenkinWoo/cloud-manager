@@ -36,6 +36,7 @@
         </div>
       </div>
       <p class="billing-note">{{ providerNote }} 费用入账可能延迟，已产生费用不一定等于银行卡扣款。</p>
+      <p class="billing-note">明细中的日期为云厂商返回的用量日期或计费期间（UTC），不是银行卡扣款日期；不同日期的费用分别列出。</p>
       <p v-if="billing.estimated" class="billing-note">当月费用为预估，结算后可能调整。</p>
       <p v-if="billing.status !== 'ok'" class="card billing-error" role="alert">{{ billing.error || '部分账单未能获取，请重试。' }}</p>
       <template v-if="billing.subscriptions?.length">

@@ -64,6 +64,9 @@ export const accountsApi = {
 }
 
 export const cloudApi = {
+  createPublicIp: (accountId, data, logTarget) => api.post(`/cloud/${accountId}/public-ips`, data, logTargetConfig(logTarget)),
+  bindPublicIp: (accountId, instanceId, data, logTarget) =>
+    api.post(`/cloud/${accountId}/instances/${encodeURIComponent(instanceId)}/public-ip`, data, logTargetConfig(logTarget)),
   listPublicIps: (accountId, params = {}, config = {}) => api.get(`/cloud/${accountId}/public-ips`, { ...config, params }),
   detachAndDeletePublicIp: (accountId, publicIpId, data, logTarget) =>
     api.post(`/cloud/${accountId}/public-ips/${encodeURIComponent(publicIpId)}/detach-and-delete`, data, logTargetConfig(logTarget)),

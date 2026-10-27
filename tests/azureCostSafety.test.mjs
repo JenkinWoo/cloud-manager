@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import AzureProvider from '../backend/providers/compute/AzureProvider.mjs'
 import { validateAzureFreeCreateParams, assertAzureFreeSubscription, withAzureAllocationLock } from '../backend/utils/azureCostPolicy.mjs'
+import { azureFreeAllocationReason } from '../backend/utils/azureFreeBenefits.mjs'
 
 const id = (type, name, subscription = 'sub') => `/subscriptions/${subscription}/resourceGroups/group/providers/${type}/${name}`
 const vmId = id('Microsoft.Compute/virtualMachines', 'vm')
@@ -16,6 +17,10 @@ function fixture() {
   p.subscription = { subscriptionId: 'sub', state: 'Enabled', subscriptionPolicies: { quotaId: 'AzureForStudents_2018-01-01' } }
   p._ensureInitialized = async () => {}
   p._getFreeVmCharges = async () => []
+  p._getUsageBilling = async () => ({ services: ['region', 'denied'].flatMap(region => [
+    ...['B1s', 'B2ats v2', 'B2pts v2'].map(meter => ({ service: 'Virtual Machines', meter: meter + ' - Free', region, amount: 0, usage: 1, unit: 'Hour' })),
+    { service: 'Storage', meter: 'P6 LRS Disk - Free', region, amount: 0, usage: .001, unit: '1/Month' }
+  ]) })
   const vm = { id: vmId, name: 'vm', tags: { managedBy: 'cloud-manager' },
     storageProfile: { osDisk: { createOption: 'FromImage', managedDisk: { id: diskId } }, dataDisks: [] },
     networkProfile: { networkInterfaces: [{ id: nicId, deleteOption: 'Delete' }] } }
@@ -33,7 +38,8 @@ function fixture() {
       const resourceId = id(type, name); deleted.push(resourceId); rows.delete(resourceId)
     }
   })
-  p.computeClient = { disks: client('Microsoft.Compute/disks'), virtualMachines: {
+  p.computeClient = { disks: { ...client('Microsoft.Compute/disks'), list: async function* () {} }, virtualMachines: {
+    listAll: async function* () {},
     get: async () => structuredClone(vm),
     beginDeleteAndWait: async () => { vmDeleted = true; deleted.push(vmId) }
   } }
@@ -41,14 +47,14 @@ function fixture() {
   return { p, vm, rows, deleted }
 }
 
-test('free-only rejects paid SKUs, incompatible images, paid disks and public IP requests before Azure writes', async () => {
+test('free VM policy rejects paid SKUs, incompatible images and paid disks before Azure writes', async () => {
   const { p } = fixture()
   p._ensureInitialized = async () => assert.fail('blocked operation reached Azure')
   const old = process.env.AZURE_FREE_ONLY
   process.env.AZURE_FREE_ONLY = 'false'
   try {
     for (const params of [{ vmSize: 'Standard_D4s_v3' }, { vmSize: 'toString' }, { storageAccountType: 'Standard_LRS' },
-      { diskSizeGB: 128 }, { imagePublisher: 'paid-marketplace' }, { createPublicIp: true },
+      { diskSizeGB: 128 }, { imagePublisher: 'paid-marketplace' },
       { vmSize: 'Standard_B2pts_v2', imageSku: '22_04-lts-gen2' }]) {
       await assert.rejects(p.createInstance({ ...params, freeOnly: false, freeVerified: true }, { creationId: 'old-queued-job' }),
         { code: 'FreeOnlyMode', statusCode: 403, retryable: false })
@@ -110,9 +116,10 @@ test('inventory check includes other regions and unattached disks', async () => 
   const { p } = fixture()
   p.computeClient.virtualMachines.listAll = async function* () { yield { id: 'other-region', hardwareProfile: { vmSize: 'Standard_B1s' } } }
   p.computeClient.disks.list = async function* () { for (const n of [1, 2]) yield { id: 'disk-' + n, sku: { name: 'Premium_LRS' }, diskSizeGB: 64 } }
-  await assert.rejects(p._assertFreeInventory('Standard_B1s'), { code: 'FreeOnlyMode' })
-  await assert.rejects(p._assertFreeInventory('Standard_B2ats_v2'), /两块/)
-  await p._assertFreeInventory('Standard_B2ats_v2', { diskId: 'disk-1' })
+  const state = { ...await p._getFreeCreateState(), now: new Date('2026-10-15T00:00:00Z') }
+  assert.match(azureFreeAllocationReason({ ...state, location: 'region', vmSize: 'Standard_B1s' }), /共享/)
+  assert.match(azureFreeAllocationReason({ ...state, location: 'region', vmSize: 'Standard_B2ats_v2' }), /占满/)
+  assert.equal(azureFreeAllocationReason({ ...state, location: 'region', vmSize: 'Standard_B2ats_v2', diskId: 'disk-1' }), '')
 })
 
 test('paid or disabled subscriptions cannot pass by changing their display name', () => {
@@ -192,16 +199,16 @@ test('resources already deleted by Azure cascade are treated as cleaned', async 
   assert.equal(result.cleanup.deleted.length, 3)
 })
 
-test('retains external data disks and public IPs and reports them explicitly', async () => {
+test('retains external data disks but deletes all bound public IPs including manually selected addresses', async () => {
   const { p, vm, rows, deleted } = fixture()
   const external = id('Microsoft.Compute/disks', 'external')
   vm.storageProfile.dataDisks.push({ managedDisk: { id: external }, deleteOption: 'Detach' })
   rows.get(ipId).tags = {}
   const result = await p.deleteInstance(vmId)
   assert.equal(result.cleanup.complete, false)
-  assert.deepEqual(result.cleanup.retained.map(r => r.id), [external, ipId])
+  assert.deepEqual(result.cleanup.retained.map(r => r.id), [external])
   assert.equal(deleted.includes(external), false)
-  assert.equal(deleted.includes(ipId), false)
+  assert.equal(deleted.includes(ipId), true)
 })
 
 test('a resource reused during deletion is not deleted and an API failure is reported', async () => {
