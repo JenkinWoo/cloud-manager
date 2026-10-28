@@ -11,6 +11,8 @@ import billingRouter from './routes/billing.mjs'
 import dnsRouter from './routes/dnsRoute.mjs'
 import logsRouter from './routes/logs.mjs'
 import settingsRouter from './routes/settings.mjs'
+import mcpRouter from './routes/mcp.mjs'
+import mcpSettingsRouter from './routes/mcpSettings.mjs'
 import tasksRouter from './routes/tasks.mjs'
 import versionRouter from './routes/version.mjs'
 import { ensureAuthConfig } from './utils/auth.mjs'
@@ -23,6 +25,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
 const PORT = process.env.PORT || 3001
 
+app.use('/mcp', mcpRouter)
 app.use(cors())
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
@@ -43,6 +46,7 @@ app.use('/api/billing', billingRouter)
 app.use('/api/dns/:dnsAccountId', dnsRouter)
 app.use('/api/tasks', tasksRouter)
 app.use('/api/settings', settingsRouter)
+app.use('/api/settings/mcp', mcpSettingsRouter)
 app.use('/api/logs', logsRouter)
 app.use('/api/version', versionRouter)
 

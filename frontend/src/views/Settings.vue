@@ -3,9 +3,11 @@
     <div class="page-header">
       <div>
         <h1>系统设置</h1>
-        <p>配置通知与账户安全信息。</p>
+        <p>配置 AI 接入、通知与账户安全信息。</p>
       </div>
     </div>
+
+    <McpSettings />
 
     <div class="card section-card">
       <h3 class="section-title">Telegram 通知</h3>
@@ -107,6 +109,7 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import McpSettings from '../components/McpSettings.vue'
 import { useRouter } from 'vue-router'
 import { authApi, settingsApi } from '../api/index.js'
 import { authState, logout, setAuthUser } from '../auth.js'

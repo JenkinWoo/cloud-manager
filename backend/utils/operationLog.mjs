@@ -112,6 +112,9 @@ function actionLabel(method, path, body = {}) {
   if (method === 'POST' && path === '/api/logs/cleanup') return '手动清理系统日志'
 
   if (method === 'PUT' && path === '/api/settings/telegram') return '更新通知配置'
+  if (method === 'PUT' && path === '/api/settings/mcp') return '更新 MCP 设置'
+  if (method === 'POST' && path === '/api/settings/mcp/tokens') return '创建 MCP 令牌'
+  if (method === 'DELETE' && path.startsWith('/api/settings/mcp/tokens/')) return '撤销 MCP 令牌'
   if (method === 'PUT' && path === '/api/settings/operation-logs') return '更新系统日志规则'
 
   if (method === 'POST' && path === '/api/accounts') return '新建云账户'

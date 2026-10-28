@@ -15,7 +15,7 @@ function dateOnly(value) {
   return date
 }
 
-function getPeriod(query) {
+export function getPeriod(query) {
   const now = new Date()
   const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1))
   const month = String(query.month || '').trim()
@@ -40,7 +40,7 @@ function errorText(error) {
   return error.response?.data?.message || error.response?.data?.error?.message || error.message || '账单查询失败'
 }
 
-async function readAccountBilling(account, period, refresh = false) {
+export async function readAccountBilling(account, period, refresh = false) {
   const base = { accountId: account.id, accountName: account.name, provider: account.computeProvider }
   const identity = createHash('sha256').update(JSON.stringify(account)).digest('hex')
   const cacheKey = `${identity}:${period.from.toISOString()}:${period.to.toISOString()}`

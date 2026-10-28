@@ -1,11 +1,10 @@
 import { Router } from 'express'
 import { accountsDb, dnsAccountsDb } from '../db.mjs'
 import { getComputeProvider, getDnsProvider } from '../providers/registry.mjs'
-import { createTask } from '../queue.mjs'
+import { createCloudInstance } from '../services/createCloudInstance.mjs'
 import { getCurrentMonthPeriod, syncTrafficUsage } from '../services/trafficUsage.mjs'
-import { validateOracleInstancePassword } from '../utils/oraclePassword.mjs'
-import { generateInstancePassword, validateAwsInstancePassword } from '../utils/instancePassword.mjs'
-import { AZURE_COST_POLICY, validateAzureFreeCreateParams } from '../utils/azureCostPolicy.mjs'
+import { generateInstancePassword } from '../utils/instancePassword.mjs'
+import { AZURE_COST_POLICY } from '../utils/azureCostPolicy.mjs'
 
 const router = Router({ mergeParams: true })
 const READ_TIMEOUT_MS = Number(process.env.CLOUD_READ_TIMEOUT_MS || 8000)
@@ -265,31 +264,7 @@ router.get('/instance-password', (req, res) => {
 router.post('/instances', async (req, res) => {
   try {
     const account = requireAccount(req.params.accountId)
-    const { delay = 60, ...params } = req.body
-    if (account.computeProvider === 'azure') validateAzureFreeCreateParams(params)
-
-    if (account.computeProvider === 'oracle') {
-      validateOracleInstancePassword(params.rootPassword)
-    }
-    if (account.computeProvider === 'aws') {
-      if (!params.rootPassword) params.rootPassword = generateInstancePassword()
-      validateAwsInstancePassword(params.rootPassword)
-    }
-    if (account.computeProvider === 'azure' && !params.adminPassword) {
-      throw new Error('Azure 实例创建需要 adminPassword')
-    }
-
-    if (account.computeProvider === 'azure') {
-      Object.assign(params, await getScopedProvider(account, req).prepareFreeCreate(params))
-    }
-
-    const task = await createTask('cloud:createInstance', account.id, {
-      ...params,
-      delay,
-      provider: account.computeProvider
-    })
-
-    res.status(202).json({ taskId: task.id, message: '创建任务已加入队列' })
+    res.status(202).json(await createCloudInstance(account, req.body))
   } catch (err) {
     res.status([400, 403].includes(err.statusCode) ? err.statusCode : 500).json({ error: err.message, code: err.code })
   }

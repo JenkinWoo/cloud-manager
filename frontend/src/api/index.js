@@ -130,6 +130,13 @@ export const tasksApi = {
   cancel: (id) => api.delete(`/tasks/${id}`)
 }
 
+export const mcpSettingsApi = {
+  get: () => api.get('/settings/mcp'),
+  save: data => api.put('/settings/mcp', data),
+  createToken: data => api.post('/settings/mcp/tokens', data),
+  revokeToken: id => api.delete(`/settings/mcp/tokens/${encodeURIComponent(id)}`)
+}
+
 export const settingsApi = {
   get: () => api.get('/settings'),
   updateTelegram: (data) => api.put('/settings/telegram', data),
