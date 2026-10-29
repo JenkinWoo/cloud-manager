@@ -202,6 +202,8 @@ docker compose up -d --build
 
 ## 故障排查
 
+实例救援终端通过 WebSocket 工作。如果页面正常但终端无法连接，请检查反向代理是否支持 `/api/cloud-shell/socket` 的 Upgrade 请求，以及容器能否访问云平台串口端点。Oracle 串口需要出站 TCP 443，AWS 串口需要出站 TCP 22，Azure 使用 HTTPS/WSS。配置示例及权限要求见 [云终端使用说明](docs/cloud-terminal-guide.md)。
+
 如果页面打不开，优先检查：
 
 1. `docker compose ps` 确认容器是否启动

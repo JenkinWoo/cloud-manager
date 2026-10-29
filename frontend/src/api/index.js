@@ -113,6 +113,12 @@ export const cloudApi = {
     api.get(`/cloud/${accountId}/azure/vm-sizes`, { ...config, params })
 }
 
+export const cloudShellApi = {
+  list: () => api.get('/cloud-shell'),
+  createSession: data => api.post('/cloud-shell/sessions', data),
+  closeSession: id => api.delete(`/cloud-shell/sessions/${encodeURIComponent(id)}`)
+}
+
 export const billingApi = {
   listAccounts: (config = {}) => api.get('/billing', config),
   get: (accountId, params = {}, config = {}) => api.get(`/billing/${encodeURIComponent(accountId)}`, { ...config, params })

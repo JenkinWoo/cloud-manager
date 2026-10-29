@@ -7,6 +7,7 @@ import { resumePersistedTasks } from './queue.mjs'
 import accountsRouter from './routes/accounts.mjs'
 import authRouter, { authRequired } from './routes/auth.mjs'
 import cloudRouter from './routes/cloud.mjs'
+import cloudShellRouter from './routes/cloudShell.mjs'
 import billingRouter from './routes/billing.mjs'
 import dnsRouter from './routes/dnsRoute.mjs'
 import logsRouter from './routes/logs.mjs'
@@ -16,6 +17,7 @@ import mcpSettingsRouter from './routes/mcpSettings.mjs'
 import tasksRouter from './routes/tasks.mjs'
 import versionRouter from './routes/version.mjs'
 import { ensureAuthConfig } from './utils/auth.mjs'
+import { installTerminalWebSocket } from './services/terminalSessions.mjs'
 import { cleanupExpiredOperationLogs, operationLogMiddleware } from './utils/operationLog.mjs'
 
 import './services/telegramNotifier.mjs'
@@ -41,6 +43,7 @@ app.use('/api', (req, res, next) => {
 })
 
 app.use('/api/accounts', accountsRouter)
+app.use('/api/cloud-shell', cloudShellRouter)
 app.use('/api/cloud/:accountId', cloudRouter)
 app.use('/api/billing', billingRouter)
 app.use('/api/dns/:dnsAccountId', dnsRouter)
@@ -65,7 +68,7 @@ app.get('/{*path}', (req, res) => {
   res.sendFile(join(frontendDist, 'index.html'))
 })
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server running at http://127.0.0.1:${PORT}`)
   console.log('Compute API: /api/cloud/:accountId/instances')
   console.log('DNS API: /api/dns/:dnsAccountId/records')
@@ -81,3 +84,13 @@ app.listen(PORT, () => {
       console.error('Failed to resume persisted tasks:', err.message)
     })
 })
+
+const closeTerminals = installTerminalWebSocket(server)
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    const deadline = setTimeout(() => process.exit(0), 10000)
+    deadline.unref()
+    server.close()
+    closeTerminals().finally(() => process.exit(0))
+  })
+}

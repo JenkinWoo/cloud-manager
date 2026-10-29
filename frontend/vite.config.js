@@ -15,6 +15,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/api/cloud-shell/socket': {
+        target: 'http://localhost:3001',
+        changeOrigin: false,
+        ws: true
+      },
       '/mcp': {
         target: 'http://localhost:3001',
         changeOrigin: true

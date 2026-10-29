@@ -7,6 +7,7 @@
 - 计算账户管理
 - 云实例列表与操作
 - 云流量看板
+- 内嵌实例救援终端：Oracle / AWS / Azure 实例串口救援
 - Oracle / AWS 实例创建
 - DNS 记录管理
 - 任务队列
@@ -38,6 +39,20 @@ frontend/   前端项目
 
 ```bash
 node --experimental-test-module-mocks --test tests/operationLog.test.mjs
+```
+
+## 实例救援终端
+
+在左侧菜单打开 **实例救援终端**（`/cloud-shell`），或点击云实例卡片上的 **救援终端**。选择账户后自动加载实例，下拉框按实例名称选择，自动带入对应实例 ID；Azure 自动加载订阅，也可切换订阅选择实例。从实例卡片进入时会自动选中对应实例。点击连接后直接在本项目页面输入命令、查看输出，支持 Ctrl+C、Tab、终端缩放和断开连接。实例列表加载失败时请刷新重试。
+
+**实例救援终端**通过云平台串口连接目标系统，不依赖实例公网 IP、SSH 服务或来宾网络。已实现 Oracle Console Connection、AWS EC2 Serial Console 和 Azure Serial Console 适配；操作系统仍可能要求用户名和密码。连接不会自动重启实例、启用账户级串口策略或修改防火墙。
+
+部署、各平台权限、支持范围和故障排查见 [云终端使用说明](docs/cloud-terminal-guide.md)。所有会话沿用本项目登录认证。终端输入、输出及临时连接凭据不持久化。离开页面会清理本会话的连接；空闲 15 分钟或总时长达到 1 小时后自动断开。
+
+隔离测试（不读取实际账户数据、不连接云平台）：
+
+```bash
+node --experimental-test-module-mocks --test tests/cloudShell.test.mjs tests/cloudTerminalProviders.test.mjs
 ```
 
 ## API Key 获取指南

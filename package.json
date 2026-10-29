@@ -1,6 +1,6 @@
 {
   "name": "cloud-manager",
-  "version": "1.3.5",
+  "version": "1.3.6",
   "description": "统一管理 Oracle、AWS、DNS 与任务队列的云资源管理平台。",
   "author": "JenkinWoo",
   "license": "ISC",
@@ -40,7 +40,9 @@
     "multer": "^2.1.1",
     "node-telegram-bot-api": "^0.66.0",
     "oci-sdk": "^2.126.1",
+    "ssh2": "^1.17.0",
     "uuid": "^13.0.0",
+    "ws": "^8.22.0",
     "zod": "^4.6.7"
   }
 }

@@ -97,6 +97,9 @@
           <router-link to="/cloud-monitor" class="nav-item">
             <span>📡</span> 云流量统计
           </router-link>
+          <router-link to="/cloud-shell" class="nav-item">
+            <span>⌨️</span> 实例救援终端
+          </router-link>
           <router-link to="/billing" class="nav-item">
             <span>💳</span> 账户账单
           </router-link>

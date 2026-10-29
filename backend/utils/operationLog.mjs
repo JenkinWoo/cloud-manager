@@ -106,6 +106,8 @@ function cloudTargetFromPath(path, body = {}, logTarget = {}) {
 }
 
 function actionLabel(method, path, body = {}) {
+  if (method === 'POST' && path === '/api/cloud-shell/sessions') return '创建云终端会话'
+  if (method === 'DELETE' && path.startsWith('/api/cloud-shell/sessions/')) return '关闭云终端会话'
   if (method === 'POST' && path === '/api/auth/login') return '登录系统'
   if (method === 'POST' && path === '/api/auth/logout') return '退出登录'
   if (method === 'POST' && path === '/api/auth/update-account') return '更新账户安全'
@@ -155,6 +157,7 @@ function actionLabel(method, path, body = {}) {
 }
 
 function resourceLabel(path) {
+  if (path.startsWith('/api/cloud-shell')) return '云终端'
   if (path.startsWith('/api/auth')) return '认证'
   if (path.startsWith('/api/logs')) return '系统日志'
   if (path.startsWith('/api/settings')) return '系统设置'

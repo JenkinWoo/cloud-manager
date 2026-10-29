@@ -148,6 +148,7 @@
             <div class="divider"></div>
 
             <div class="action-row">
+              <router-link class="btn btn-ghost btn-sm" :to="{ path: '/cloud-shell', query: { accountId: selectedAccountId, instanceId: instance.id } }">救援终端</router-link>
               <button v-if="hasCapability('rename_instance')" class="btn btn-ghost btn-sm"
                 :disabled="renamingInstance" @click="openRename(instance)">修改名称</button>
               <button v-if="['STOPPED', 'TERMINATED'].includes(normalizeState(instance.state))"
